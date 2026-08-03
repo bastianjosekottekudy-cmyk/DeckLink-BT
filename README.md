@@ -57,6 +57,19 @@ chmod +x install-deck.sh
 
 Config lives in `~/.config/decklink-bt/config.json`.
 
+## CI / Releases
+
+GitHub Actions workflow definitions live in [`packaging/github-workflows/`](packaging/github-workflows/).  
+To enable automated Linux builds and Releases, copy them once:
+
+```bash
+mkdir -p .github/workflows
+cp packaging/github-workflows/*.yml .github/workflows/
+git add .github/workflows && git commit -m "Enable CI workflows" && git push
+```
+
+(Requires a GitHub token with the `workflow` scope.) Then tag `v1.0.0` (or later) to publish `decklink-bt-linux-x86_64.tar.gz` on the Releases page.
+
 ## Build from source
 
 ```bash
