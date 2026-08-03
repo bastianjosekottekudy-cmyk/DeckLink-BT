@@ -10,3 +10,6 @@ Cargo.lock.bak
 repo/
 dist/
 *.AppImage
+
+# Local copies — ship templates via packaging/github-workflows (OAuth lacks workflow scope)
+.github/workflows/
