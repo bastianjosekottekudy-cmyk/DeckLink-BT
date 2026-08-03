@@ -1,0 +1,11 @@
+{
+  "name": "DeckLink BT",
+  "author": "bastianjosekottekudy-cmyk",
+  "flags": ["root"],
+  "publish": {
+    "tags": ["bluetooth", "gamepad", "utility"],
+    "description": "Launch DeckLink BT — use your Steam Deck as a BLE gamepad.",
+    "image": null
+  },
+  "version": "1.0.0"
+}

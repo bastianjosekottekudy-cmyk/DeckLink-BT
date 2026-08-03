@@ -1,0 +1,132 @@
+import { Button, VerticalBox, HorizontalBox, ComboBox } from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    title: "DeckLink BT";
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    background: #0f1419;
+
+    in-out property <string> status-text: "Ready";
+    in-out property <int> battery-pct: 100;
+    in-out property <bool> advertising: false;
+    in-out property <bool> connected: false;
+    in-out property <string> peer-name: "—";
+    in-out property <[string]> profile-options: [
+        "Gamepad (Xbox)",
+        "Desktop & Media",
+        "Flight Sim",
+        "Racing (Gyro)",
+    ];
+    in-out property <int> selected-profile: 0;
+    in-out property <string> targets-text: "(none yet)";
+
+    callback start-advertise();
+    callback stop-advertise();
+    callback profile-changed(int);
+    callback refresh-targets();
+
+    VerticalBox {
+        padding: 32px;
+        spacing: 20px;
+
+        Text {
+            text: "DeckLink BT";
+            color: #e8eef5;
+            font-size: 42px;
+            font-weight: 700;
+        }
+
+        Text {
+            text: "Steam Deck → driverless BLE gamepad";
+            color: #8aa0b5;
+            font-size: 18px;
+        }
+
+        HorizontalBox {
+            spacing: 24px;
+            Text {
+                text: advertising ? "Advertising: ON" : "Advertising: OFF";
+                color: advertising ? #3dd68c : #f07178;
+                font-size: 20px;
+                font-weight: 600;
+            }
+            Text {
+                text: connected ? "Connected: " + peer-name : "Connected: no";
+                color: connected ? #3dd68c : #8aa0b5;
+                font-size: 20px;
+            }
+            Text {
+                text: "Battery " + battery-pct + "%";
+                color: #e8eef5;
+                font-size: 20px;
+            }
+        }
+
+        Text {
+            text: status-text;
+            color: #c5d4e3;
+            font-size: 16px;
+            wrap: word-wrap;
+        }
+
+        HorizontalBox {
+            spacing: 16px;
+            Text {
+                text: "Profile";
+                color: #8aa0b5;
+                font-size: 18px;
+                vertical-alignment: center;
+            }
+            ComboBox {
+                model: root.profile-options;
+                current-index <=> root.selected-profile;
+                selected => {
+                    root.profile-changed(root.selected-profile);
+                }
+            }
+        }
+
+        HorizontalBox {
+            spacing: 16px;
+            Button {
+                text: "Start Advertising";
+                primary: true;
+                clicked => {
+                    root.start-advertise();
+                }
+            }
+            Button {
+                text: "Stop";
+                clicked => {
+                    root.stop-advertise();
+                }
+            }
+            Button {
+                text: "Refresh Targets";
+                clicked => {
+                    root.refresh-targets();
+                }
+            }
+        }
+
+        Text {
+            text: "Paired targets";
+            color: #8aa0b5;
+            font-size: 16px;
+        }
+
+        Text {
+            text: targets-text;
+            color: #e8eef5;
+            font-size: 16px;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: "Tip: Pair once from the host Bluetooth settings. Launch DeckLink BT from Gaming Mode as a Non-Steam game.";
+            color: #6b7f93;
+            font-size: 14px;
+            wrap: word-wrap;
+        }
+    }
+}

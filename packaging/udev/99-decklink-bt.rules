@@ -1,0 +1,5 @@
+# Allow userspace access to Steam Deck / gamepad input nodes for DeckLink BT
+KERNEL=="event*", SUBSYSTEM=="input", MODE="0660", GROUP="input", TAG+="uaccess"
+KERNEL=="js*", SUBSYSTEM=="input", MODE="0660", GROUP="input", TAG+="uaccess"
+# HID raw (if used)
+KERNEL=="hidraw*", MODE="0660", GROUP="input", TAG+="uaccess"

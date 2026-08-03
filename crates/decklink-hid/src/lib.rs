@@ -1,0 +1,29 @@
+//! HID report descriptors and packers for DeckLink BT (HOGP gamepad + mouse + media).
+
+mod descriptor;
+mod gamepad;
+mod mouse;
+mod media;
+mod state;
+
+pub use descriptor::{HID_REPORT_MAP, APPEARANCE_GAMEPAD};
+pub use gamepad::{GamepadButtons, GamepadReport, Hat, GAMEPAD_REPORT_ID, GAMEPAD_REPORT_LEN};
+pub use mouse::{MouseButtons, MouseReport, MOUSE_REPORT_ID, MOUSE_REPORT_LEN};
+pub use media::{MediaKeys, MediaReport, MEDIA_REPORT_ID, MEDIA_REPORT_LEN};
+pub use state::ControllerState;
+
+/// Combined outbound HID payload (report id + body) ready for GATT notify.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HidPacket {
+    pub report_id: u8,
+    pub data: Vec<u8>,
+}
+
+impl HidPacket {
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(1 + self.data.len());
+        out.push(self.report_id);
+        out.extend_from_slice(&self.data);
+        out
+    }
+}

@@ -1,0 +1,10 @@
+[package]
+name = "decklink-hid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HID report descriptors and packers for DeckLink BT"
+
+[dependencies]
+bitflags.workspace = true
+serde.workspace = true

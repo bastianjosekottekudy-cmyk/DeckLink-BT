@@ -1,0 +1,16 @@
+[package]
+name = "decklink-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Slint gamepad UI for DeckLink BT"
+build = "build.rs"
+
+[dependencies]
+slint = { version = "1.9", default-features = true }
+serde.workspace = true
+decklink-profiles.workspace = true
+decklink-hid.workspace = true
+
+[build-dependencies]
+slint-build = "1.9"

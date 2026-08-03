@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/decklink-hid",
+    "crates/decklink-input",
+    "crates/decklink-bt",
+    "crates/decklink-profiles",
+    "crates/decklink-ui",
+    "crates/decklink-app",
+]
+default-members = ["crates/decklink-app"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Bastian Jose <bastianjosekottekudy-cmyk>"]
+repository = "https://github.com/bastianjosekottekudy-cmyk/DeckLink-BT"
+homepage = "https://github.com/bastianjosekottekudy-cmyk/DeckLink-BT"
+description = "Steam Deck as a driverless BLE HOGP gamepad"
+rust-version = "1.75"
+
+[workspace.dependencies]
+decklink-hid = { path = "crates/decklink-hid" }
+decklink-input = { path = "crates/decklink-input" }
+decklink-bt = { path = "crates/decklink-bt" }
+decklink-profiles = { path = "crates/decklink-profiles" }
+decklink-ui = { path = "crates/decklink-ui" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+dirs = "6"
+bitflags = { version = "2", features = ["serde"] }
+async-trait = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3

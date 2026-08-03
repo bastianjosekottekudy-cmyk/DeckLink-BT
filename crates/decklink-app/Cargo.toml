@@ -1,0 +1,27 @@
+[package]
+name = "decklink-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DeckLink BT — Steam Deck BLE HOGP gamepad"
+default-run = "decklink-bt"
+
+[[bin]]
+name = "decklink-bt"
+path = "src/main.rs"
+
+[dependencies]
+decklink-hid.workspace = true
+decklink-input.workspace = true
+decklink-bt.workspace = true
+decklink-profiles.workspace = true
+decklink-ui.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+clap = { version = "4", features = ["derive"] }
+slint = { version = "1.9", default-features = true }
