@@ -22,23 +22,40 @@ DeckLink BT turns your Steam Deck into a BLE HID gamepad (HOGP). The host PC, ph
 
 ## Install on Steam Deck (Desktop Mode)
 
-### Option A — one-liner from GitHub Releases
+### From GitHub Releases (recommended)
+
+1. Download `decklink-bt-linux-x86_64.tar.gz` from the [latest release](https://github.com/bastianjosekottekudy-cmyk/DeckLink-BT/releases/latest).
+2. Extract and run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bastianjosekottekudy-cmyk/DeckLink-BT/main/scripts/install-deck.sh | bash
-```
-
-### Option B — manual
-
-1. Download the latest `.tar.gz` or `.flatpak` from [Releases](https://github.com/bastianjosekottekudy-cmyk/DeckLink-BT/releases).
-2. Run:
-
-```bash
-chmod +x install-deck.sh
-./install-deck.sh /path/to/decklink-bt-*.tar.gz
+./scripts/install-deck.sh ./decklink-bt-linux-x86_64.tar.gz
 ```
 
 3. Return to **Gaming Mode**, launch **DeckLink BT**, tap **Start Advertising**, then pair from the host Bluetooth settings.
+
+### Build from source on Deck
+
+```bash
+git clone https://github.com/bastianjosekottekudy-cmyk/DeckLink-BT.git
+cd DeckLink-BT
+cargo build --release -p decklink-app
+./scripts/install-deck.sh
+```
+
+## Publishing releases (maintainers)
+
+There is **no tag-triggered release workflow**. After commits are pushed to `main`, CI builds the Linux tarball artifact. Publish/replace the current version’s GitHub Release with:
+
+```bash
+python scripts/publish_latest_release.py
+```
+
+- Reuses `Cargo.toml` version (e.g. `1.0.0` → release `v1.0.0`) and **replaces** assets.
+- Bump version **only** when asked explicitly:
+
+```bash
+python scripts/publish_latest_release.py --bump patch   # or minor / major
+```
 
 ## Pairing (host)
 
@@ -59,16 +76,8 @@ Config lives in `~/.config/decklink-bt/config.json`.
 
 ## CI / Releases
 
-GitHub Actions workflow definitions live in [`packaging/github-workflows/`](packaging/github-workflows/).  
-To enable automated Linux builds and Releases, copy them once:
-
-```bash
-mkdir -p .github/workflows
-cp packaging/github-workflows/*.yml .github/workflows/
-git add .github/workflows && git commit -m "Enable CI workflows" && git push
-```
-
-(Requires a GitHub token with the `workflow` scope.) Then tag `v1.0.0` (or later) to publish `decklink-bt-linux-x86_64.tar.gz` on the Releases page.
+- **CI** (`.github/workflows/ci.yml`): on every `main` push, tests + builds `decklink-bt-linux-x86_64.tar.gz` as an Actions artifact.
+- **Publish**: run `python scripts/publish_latest_release.py` after push — replaces assets on the current `v{version}` release. Do **not** bump version unless the user asks (`--bump`).
 
 ## Build from source
 
