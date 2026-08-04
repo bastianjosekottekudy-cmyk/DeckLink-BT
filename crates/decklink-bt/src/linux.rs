@@ -2,7 +2,6 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 use bluer::adv::{Advertisement, Type as AdvType};
 use bluer::gatt::local::{
@@ -103,24 +102,17 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
         .await
         .map_err(|e| BtError::Unavailable(e.to_string()))?;
 
-    // Required for host pairing / Gaming Mode reconnects after Desktop Mode bond
-    let _ = adapter.set_discoverable(true).await;
-    let _ = adapter.set_pairable(true).await;
-    if let Err(e) = adapter.set_discoverable_timeout(0).await {
-        warn!("discoverable_timeout: {e}");
+    // Best-effort only — Desktop Mode already has a system pairing agent.
+    // Failing these must NOT abort advertising (that broke Desktop connect).
+    if let Err(e) = adapter.set_discoverable(true).await {
+        warn!("set_discoverable: {e}");
     }
-
-    // Just-Works / NoInputNoOutput agent so hosts can bond without a PIN UI on the Deck
-    let agent = bluer::agent::Agent {
-        request_default: true,
-        ..Default::default()
-    };
-    let agent_handle = session
-        .register_agent(agent)
-        .await
-        .map_err(|e| BtError::Message(format!("pairing agent failed: {e}")))?;
-    // Keep agent registered for the life of the process
-    std::mem::forget(agent_handle);
+    if let Err(e) = adapter.set_pairable(true).await {
+        warn!("set_pairable: {e}");
+    }
+    // Do not register a custom agent: BlueZ docs recommend using the default
+    // system agent unless you are a pairing wizard. request_default agents
+    // conflict with KDE/Steam Desktop and abort start_hogp.
 
     let (report_tx, mut report_rx) = mpsc::channel::<HidPacket>(128);
     let (battery_tx, battery_rx) = watch::channel(100u8);
@@ -341,8 +333,8 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
         discoverable: Some(true),
         local_name: Some(device_name.clone()),
         appearance: Some(APPEARANCE_GAMEPAD),
-        // 0 = advertise until stopped (BlueZ)
-        duration: Some(Duration::from_secs(0)),
+        // Leave duration/timeout unset (BlueZ defaults). duration=0 can mean
+        // "advertise for zero seconds" and immediately stop being visible.
         ..Default::default()
     };
 

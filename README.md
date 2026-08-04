@@ -153,8 +153,10 @@ A thin plugin under [`packaging/decky`](packaging/decky) launches the installed 
 | Host does not see gamepad | Forget device, re-advertise, pair again; confirm HOGP/HID over GATT |
 | Steam Input conflicts | Properties → Controller → **Disable Steam Input** for DeckLink BT |
 | Works in Desktop, not Gaming Mode | Use `launch.sh` wrapper; disable Steam Input; forget+re-pair on host |
+| Advertise fails / Desktop connect broken | Update to latest release; check UI status for Bluetooth error; `bluetoothctl power on` |
 | Host pairs but no input | Steam Input still enabled, or advertising stopped when leaving Desktop Mode |
 | Advertise fails in Gaming Mode | Disconnect Deck Bluetooth headphones; ensure BlueZ/`bluetoothctl power on` |
+| Stuck after uninstall/reinstall | Host: Forget DeckLink BT; Deck: `bluetoothctl power off && bluetoothctl power on` |
 | High latency | Keep Deck close to host; some hosts ignore 7.5 ms interval requests |
 
 ## License
