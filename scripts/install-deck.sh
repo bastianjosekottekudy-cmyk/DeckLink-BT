@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DeckLink BT — Steam Deck / SteamOS installer
+# DeckLink BT — Steam Deck / SteamOS installer (Desktop Mode)
 # Usage:
 #   bash scripts/install-deck.sh ./decklink-bt-linux-x86_64.tar.gz
 #   bash scripts/install-deck.sh          # download latest release
@@ -14,6 +14,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 UDEV_RULE_SRC="${ROOT_DIR}/packaging/udev/99-decklink-bt.rules"
 FLATPAK_ID="$APP_ID"
 STEAMOS_RO_TOUCHED=0
+DESKTOP_FILE_NAME="decklink-bt.desktop"
 
 echo "==> DeckLink BT installer"
 
@@ -151,19 +152,53 @@ if command -v usermod >/dev/null 2>&1; then
 fi
 steamos_rw_end
 
-# --- Desktop Mode app menu entry ---------------------------------------------
-APPS="${HOME}/.local/share/applications"
-mkdir -p "$APPS"
-cat > "${APPS}/decklink-bt.desktop" <<EOF
+# --- Desktop entry (app menu + Desktop shortcut) -----------------------------
+write_desktop_file() {
+  local dest="$1"
+  cat > "$dest" <<EOF
 [Desktop Entry]
+Version=1.0
+Type=Application
 Name=DeckLink BT
 Comment=Steam Deck as a BLE gamepad / keyboard+mouse
 Exec=env WINIT_UNIX_BACKEND=x11 SLINT_BACKEND=winit ${LAUNCH} --advertise
 Icon=input-gaming
 Terminal=false
-Type=Application
 Categories=Game;Utility;
+StartupNotify=true
 EOF
+  chmod +x "$dest" || true
+  # KDE/Plasma: mark as trusted so double-click works without a prompt
+  if command -v gio >/dev/null 2>&1; then
+    gio set "$dest" metadata::trusted true 2>/dev/null || true
+  fi
+  if command -v dbus-launch >/dev/null 2>&1; then
+    true
+  fi
+}
+
+APPS="${HOME}/.local/share/applications"
+mkdir -p "$APPS"
+write_desktop_file "${APPS}/${DESKTOP_FILE_NAME}"
+
+# Visible Desktop shortcut (Steam Deck Desktop Mode)
+DESKTOP_DIR="${HOME}/Desktop"
+if [[ ! -d "$DESKTOP_DIR" ]]; then
+  DESKTOP_DIR="$(xdg-user-dir DESKTOP 2>/dev/null || true)"
+fi
+if [[ -n "${DESKTOP_DIR:-}" && -d "$DESKTOP_DIR" ]]; then
+  write_desktop_file "${DESKTOP_DIR}/${DESKTOP_FILE_NAME}"
+  echo "==> Desktop shortcut: ${DESKTOP_DIR}/${DESKTOP_FILE_NAME}"
+else
+  mkdir -p "${HOME}/Desktop"
+  write_desktop_file "${HOME}/Desktop/${DESKTOP_FILE_NAME}"
+  echo "==> Desktop shortcut: ${HOME}/Desktop/${DESKTOP_FILE_NAME}"
+fi
+
+# Refresh app menu cache when available
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database "$APPS" 2>/dev/null || true
+fi
 
 # Remove legacy Gaming Mode / Non-Steam launchers from older installs
 rm -f "${INSTALL_DIR}/launch.sh" \
@@ -171,11 +206,13 @@ rm -f "${INSTALL_DIR}/launch.sh" \
   "${INSTALL_DIR}/DeckLink BT.desktop" 2>/dev/null || true
 
 echo
-echo "Done. Desktop Mode only — launch from the application menu: DeckLink BT"
+echo "Done. Desktop Mode only."
+echo "  App menu: DeckLink BT"
+echo "  Desktop shortcut: ~/Desktop/${DESKTOP_FILE_NAME}"
 echo "  Binary: ${LAUNCH}"
-echo "  Switch Xbox ↔ Keyboard+Mouse: UI tabs, or Select+Start on the Deck"
-echo "  Then advertise → pair from host Bluetooth settings."
+echo "  Switch Xbox / Keyboard+Mouse: UI tabs or Select+Start"
+echo "  Pair: open app (auto-advertise) then add Bluetooth device on the host."
+echo "  If host connects but no input: Forget DeckLink BT on host, then re-pair."
 echo
-echo "If you still have an old Steam Non-Steam shortcut named DeckLink BT / launch.sh, remove it."
 echo "If sudo/udev failed: open Konsole and re-run with a password prompt available."
 echo "If Permission denied on the script: bash scripts/install-deck.sh ./decklink-bt-linux-x86_64.tar.gz"

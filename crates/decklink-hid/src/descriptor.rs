@@ -112,5 +112,15 @@ pub const HID_REPORT_MAP: &[u8] = &[
     0x19, 0x00, //   Usage Minimum (0)
     0x29, 0x65, //   Usage Maximum (101)
     0x81, 0x00, //   Input (Data,Array)
+    // LED Output (Caps/Num/Scroll…) — required by some hosts during HID init
+    0x05, 0x08, //   Usage Page (LEDs)
+    0x19, 0x01, //   Usage Minimum (Num Lock)
+    0x29, 0x05, //   Usage Maximum (Kana)
+    0x95, 0x05, //   Report Count (5)
+    0x75, 0x01, //   Report Size (1)
+    0x91, 0x02, //   Output (Data,Var,Abs)
+    0x95, 0x01, //   Report Count (1)
+    0x75, 0x03, //   Report Size (3)
+    0x91, 0x03, //   Output (Const) padding
     0xC0,       // End Collection
 ];

@@ -37,20 +37,24 @@ const UUID_MODEL: Uuid = uuid16(0x2A24);
 const UUID_PNP_ID: Uuid = uuid16(0x2A50);
 const UUID_BATTERY_LEVEL: Uuid = uuid16(0x2A19);
 
-fn report_characteristic(
+/// Input Report characteristic (Report Reference type = 0x01).
+///
+/// Security: do **not** set encrypt_read. Requiring encryption here commonly
+/// leaves hosts "connected" with CCCD never enabled, so no HID input arrives.
+/// Bonding/encryption is still negotiated by BlueZ/the host as needed.
+fn input_report_characteristic(
     report_id: u8,
     latest: Arc<Mutex<Vec<u8>>>,
     notifier_reg: mpsc::Sender<mpsc::Sender<Vec<u8>>>,
 ) -> Characteristic {
     let report_ref = vec![report_id, 0x01]; // Report ID, Input Report
     let latest_r = latest.clone();
+    let latest_n = latest.clone();
 
     Characteristic {
         uuid: UUID_REPORT,
         read: Some(CharacteristicRead {
             read: true,
-            // HOGP requires an encrypted link; ask BlueZ to enforce on read.
-            encrypt_read: true,
             fun: Box::new(move |_req| {
                 let latest_r = latest_r.clone();
                 Box::pin(async move { Ok(latest_r.lock().await.clone()) })
@@ -61,18 +65,81 @@ fn report_characteristic(
             notify: true,
             method: CharacteristicNotifyMethod::Fun(Box::new(move |mut notifier| {
                 let notifier_reg = notifier_reg.clone();
+                let latest_n = latest_n.clone();
                 Box::pin(async move {
-                    info!("host subscribed to HID report {report_id} notifications");
+                    info!("host subscribed to HID input report {report_id}");
                     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
-                    let _ = notifier_reg.send(tx).await;
-                    tokio::spawn(async move {
-                        while let Some(value) = rx.recv().await {
-                            if notifier.notify(value).await.is_err() {
-                                break;
+                    if notifier_reg.send(tx).await.is_err() {
+                        warn!("failed to register notifier for report {report_id}");
+                        return;
+                    }
+                    // Push current value so the host HID stack wakes immediately.
+                    let initial = latest_n.lock().await.clone();
+                    if notifier.notify(initial).await.is_err() {
+                        warn!("initial notify failed for report {report_id}");
+                        return;
+                    }
+                    // Keep this Fun alive for the whole notification session.
+                    loop {
+                        tokio::select! {
+                            _ = notifier.stopped() => break,
+                            msg = rx.recv() => {
+                                match msg {
+                                    Some(value) => {
+                                        if notifier.notify(value).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    None => break,
+                                }
                             }
                         }
-                        info!("HID report {report_id} notification session ended");
-                    });
+                    }
+                    info!("HID input report {report_id} notification session ended");
+                })
+            })),
+            ..Default::default()
+        }),
+        descriptors: vec![Descriptor {
+            uuid: UUID_REPORT_REF,
+            read: Some(DescriptorRead {
+                read: true,
+                fun: Box::new(move |_req| {
+                    let v = report_ref.clone();
+                    Box::pin(async move { Ok(v) })
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+/// Keyboard LED Output Report (Report Reference type = 0x02). Some hosts
+/// expect this during HID init even if they never write LEDs.
+fn keyboard_output_report_characteristic() -> Characteristic {
+    let report_ref = vec![3u8, 0x02];
+    let leds = Arc::new(Mutex::new(vec![0u8]));
+    let leds_r = leds.clone();
+    Characteristic {
+        uuid: UUID_REPORT,
+        read: Some(CharacteristicRead {
+            read: true,
+            fun: Box::new(move |_req| {
+                let leds_r = leds_r.clone();
+                Box::pin(async move { Ok(leds_r.lock().await.clone()) })
+            }),
+            ..Default::default()
+        }),
+        write: Some(CharacteristicWrite {
+            write: true,
+            write_without_response: true,
+            method: CharacteristicWriteMethod::Fun(Box::new(move |value, _req| {
+                let leds = leds.clone();
+                Box::pin(async move {
+                    *leds.lock().await = value;
+                    Ok(())
                 })
             })),
             ..Default::default()
@@ -107,16 +174,12 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
         .map_err(|e| BtError::Unavailable(e.to_string()))?;
 
     // Best-effort only — Desktop Mode already has a system pairing agent.
-    // Failing these must NOT abort advertising (that broke Desktop connect).
     if let Err(e) = adapter.set_discoverable(true).await {
         warn!("set_discoverable: {e}");
     }
     if let Err(e) = adapter.set_pairable(true).await {
         warn!("set_pairable: {e}");
     }
-    // Do not register a custom agent: BlueZ docs recommend using the default
-    // system agent unless you are a pairing wizard. request_default agents
-    // conflict with KDE/Steam Desktop and abort start_hogp.
 
     let (report_tx, mut report_rx) = mpsc::channel::<HidPacket>(128);
     let (battery_tx, battery_rx) = watch::channel(100u8);
@@ -131,26 +194,29 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
     let notifiers2: Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
     let notifiers3: Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let (reg1_tx, mut reg1_rx) = mpsc::channel(4);
-    let (reg2_tx, mut reg2_rx) = mpsc::channel(4);
-    let (reg3_tx, mut reg3_rx) = mpsc::channel(4);
+    let (reg1_tx, mut reg1_rx) = mpsc::channel(8);
+    let (reg2_tx, mut reg2_rx) = mpsc::channel(8);
+    let (reg3_tx, mut reg3_rx) = mpsc::channel(8);
 
     {
         let n1 = notifiers1.clone();
         tokio::spawn(async move {
             while let Some(tx) = reg1_rx.recv().await {
+                info!("HID report 1 (gamepad) notify session registered");
                 n1.lock().await.push(tx);
             }
         });
         let n2 = notifiers2.clone();
         tokio::spawn(async move {
             while let Some(tx) = reg2_rx.recv().await {
+                info!("HID report 2 (mouse) notify session registered");
                 n2.lock().await.push(tx);
             }
         });
         let n3 = notifiers3.clone();
         tokio::spawn(async move {
             while let Some(tx) = reg3_rx.recv().await {
+                info!("HID report 3 (keyboard) notify session registered");
                 n3.lock().await.push(tx);
             }
         });
@@ -213,7 +279,8 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                         read: Some(CharacteristicRead {
                             read: true,
                             fun: Box::new(|_req| {
-                                Box::pin(async move { Ok(vec![0x11, 0x01, 0x00, 0x02]) })
+                                // bcdHID=1.11, country=0, flags=RemoteWake|NormallyConnectable
+                                Box::pin(async move { Ok(vec![0x11, 0x01, 0x00, 0x03]) })
                             }),
                             ..Default::default()
                         }),
@@ -231,9 +298,10 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                         }),
                         ..Default::default()
                     },
-                    report_characteristic(1, latest1.clone(), reg1_tx),
-                    report_characteristic(2, latest2.clone(), reg2_tx),
-                    report_characteristic(3, latest3.clone(), reg3_tx),
+                    input_report_characteristic(1, latest1.clone(), reg1_tx),
+                    input_report_characteristic(2, latest2.clone(), reg2_tx),
+                    input_report_characteristic(3, latest3.clone(), reg3_tx),
+                    keyboard_output_report_characteristic(),
                 ],
                 ..Default::default()
             },
@@ -269,6 +337,7 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                             read: true,
                             fun: Box::new(|_req| {
                                 Box::pin(async move {
+                                    // Bluetooth vendor source, VID 0x28DE (Valve), PID 0x1101, ver 1.0
                                     Ok(vec![0x01, 0xDE, 0x28, 0x01, 0x11, 0x00, 0x01])
                                 })
                             }),
@@ -299,17 +368,20 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                             move |mut notifier| {
                                 let mut battery = battery.clone();
                                 Box::pin(async move {
-                                    tokio::spawn(async move {
-                                        loop {
-                                            if battery.changed().await.is_err() {
-                                                break;
-                                            }
-                                            let v = *battery.borrow();
-                                            if notifier.notify(vec![v]).await.is_err() {
-                                                break;
+                                    loop {
+                                        tokio::select! {
+                                            _ = notifier.stopped() => break,
+                                            res = battery.changed() => {
+                                                if res.is_err() {
+                                                    break;
+                                                }
+                                                let v = *battery.borrow();
+                                                if notifier.notify(vec![v]).await.is_err() {
+                                                    break;
+                                                }
                                             }
                                         }
-                                    });
+                                    }
                                 })
                             }
                         })),
@@ -330,6 +402,7 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
 
     let mut uuids = BTreeSet::new();
     uuids.insert(UUID_HID);
+    uuids.insert(UUID_BATTERY);
 
     let le_adv = Advertisement {
         advertisement_type: AdvType::Peripheral,
@@ -337,8 +410,6 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
         discoverable: Some(true),
         local_name: Some(device_name.clone()),
         appearance: Some(APPEARANCE_GAMEPAD),
-        // Leave duration/timeout unset (BlueZ defaults). duration=0 can mean
-        // "advertise for zero seconds" and immediately stop being visible.
         ..Default::default()
     };
 
@@ -349,7 +420,6 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
 
     let _ = event_tx.send(BtEvent::Advertising(true)).await;
     info!("HOGP advertising as '{}'", device_name);
-    warn!("connection interval is host-negotiated; prefer 7.5–11.25 ms on the host");
 
     let mut device_events = adapter
         .events()
@@ -357,6 +427,9 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
         .map_err(|e| BtError::Message(e.to_string()))?;
     let event_tx2 = event_tx.clone();
     let adapter2 = adapter.clone();
+    let n1c = notifiers1.clone();
+    let n2c = notifiers2.clone();
+    let n3c = notifiers3.clone();
     tokio::spawn(async move {
         while let Some(evt) = device_events.next().await {
             match evt {
@@ -372,9 +445,29 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                             let _ = event_tx2
                                 .send(BtEvent::Connected {
                                     address: addr.to_string(),
-                                    name,
+                                    name: name.clone(),
                                 })
                                 .await;
+                            // Give the host a moment to enable CCCDs, then warn if none.
+                            let n1c = n1c.clone();
+                            let n2c = n2c.clone();
+                            let n3c = n3c.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                let c1 = n1c.lock().await.len();
+                                let c2 = n2c.lock().await.len();
+                                let c3 = n3c.lock().await.len();
+                                if c1 + c2 + c3 == 0 {
+                                    warn!(
+                                        "host {name} connected but no HID notify subscriptions yet \
+                                         (gamepad={c1} mouse={c2} keyboard={c3}) — forget+re-pair on host"
+                                    );
+                                } else {
+                                    info!(
+                                        "host {name} HID subscriptions: gamepad={c1} mouse={c2} keyboard={c3}"
+                                    );
+                                }
+                            });
                         }
                     }
                 }
@@ -408,9 +501,6 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
             let mut dead = Vec::new();
             {
                 let ns = notifiers.lock().await;
-                if ns.is_empty() && pkt.report_id == 1 {
-                    // Host connected but has not enabled CCCD yet — common until bond completes.
-                }
                 for (i, n) in ns.iter().enumerate() {
                     if n.send(pkt.data.clone()).await.is_err() {
                         dead.push(i);

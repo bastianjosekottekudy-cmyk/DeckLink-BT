@@ -223,7 +223,7 @@ async fn pump_reports(shared: &Arc<Mutex<Shared>>, state: &decklink_hid::Control
     if maybe_toggle_profile_chord(shared, state).await {
         // Chord consumed this frame — still map with the new profile below.
     }
-    let (packets, report_tx) = {
+    let (mut packets, report_tx) = {
         let g = shared.lock().unwrap();
         let profile = g.store.config.active_profile;
         let mapped = map_state(profile, state);
@@ -233,9 +233,21 @@ async fn pump_reports(shared: &Arc<Mutex<Shared>>, state: &decklink_hid::Control
         let tx = g.hogp.as_ref().map(|h| h.report_tx.clone());
         (mapped.packets, tx)
     };
+    // Always refresh every HID collection so hosts that only subscribed to
+    // gamepad (or only KM) still receive releases / idle for the other IDs.
+    ensure_all_report_ids(&mut packets);
     if let Some(tx) = report_tx {
         for pkt in packets {
             let _ = tx.send(pkt).await;
+        }
+    }
+}
+
+fn ensure_all_report_ids(packets: &mut Vec<HidPacket>) {
+    let have: std::collections::HashSet<u8> = packets.iter().map(|p| p.report_id).collect();
+    for idle in idle_release_packets() {
+        if !have.contains(&idle.report_id) {
+            packets.push(idle);
         }
     }
 }
@@ -308,7 +320,9 @@ async fn drain_bt_events(shared: &Arc<Mutex<Shared>>) {
             BtEvent::Connected { address, name } => {
                 g.connected = true;
                 g.peer_name = name.clone();
-                g.status = format!("Connected to {name}");
+                g.status = format!(
+                    "Connected to {name} — move sticks / tap soft keys; if no input, Forget on host and re-pair"
+                );
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_secs().to_string())
