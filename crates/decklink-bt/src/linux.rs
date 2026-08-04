@@ -58,7 +58,7 @@ fn report_characteristic(
         }),
         notify: Some(CharacteristicNotify {
             notify: true,
-            method: CharacteristicNotifyMethod::Fun(Box::new(move |notifier| {
+            method: CharacteristicNotifyMethod::Fun(Box::new(move |mut notifier| {
                 let notifier_reg = notifier_reg.clone();
                 Box::pin(async move {
                     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
@@ -281,7 +281,7 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                         notify: true,
                         method: CharacteristicNotifyMethod::Fun(Box::new({
                             let battery = battery_rx.clone();
-                            move |notifier| {
+                            move |mut notifier| {
                                 let mut battery = battery.clone();
                                 Box::pin(async move {
                                     tokio::spawn(async move {

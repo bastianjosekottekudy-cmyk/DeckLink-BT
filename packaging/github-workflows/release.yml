@@ -50,7 +50,7 @@ jobs:
           generate_release_notes: true
           draft: false
           body: |
-            ## DeckLink BT v1.0.0
+            ## DeckLink BT
 
             Steam Deck as a driverless BLE HOGP gamepad.
 
@@ -58,9 +58,6 @@ jobs:
             1. Download `decklink-bt-linux-x86_64.tar.gz` below
             2. Extract and run `./scripts/install-deck.sh ./decklink-bt-linux-x86_64.tar.gz`
             3. Launch **DeckLink BT** from Gaming Mode → Start Advertising → pair from host
-
-      - name: Test portable crates
-        run: cargo test -p decklink-hid -p decklink-profiles
 
   test:
     runs-on: ubuntu-24.04
