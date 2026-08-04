@@ -25,3 +25,6 @@ serde_json.workspace = true
 dirs.workspace = true
 clap = { version = "4", features = ["derive"] }
 slint = { version = "1.9", default-features = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

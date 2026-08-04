@@ -45,6 +45,8 @@ struct Cli {
 struct Shared {
     store: ProfileStore,
     hogp: Option<HogpServer>,
+    /// True while start_hogp is in flight (blocks duplicate Advertise races).
+    bt_starting: bool,
     advertising: bool,
     connected: bool,
     peer_name: String,
@@ -97,6 +99,11 @@ async fn main() -> Result<()> {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
 
+    // One process only — two instances fight over EVIOCGRAB (EBUSY) and break silence.
+    let _instance_lock = acquire_instance_lock().context(
+        "DeckLink BT is already running — close the other window/shortcut and try again",
+    )?;
+
     let cli = Cli::parse();
 
     if !cli.headless {
@@ -132,11 +139,12 @@ async fn main() -> Result<()> {
     let shared = Arc::new(Mutex::new(Shared {
         store,
         hogp: None,
+        bt_starting: false,
         advertising: false,
         connected: false,
         peer_name: "—".into(),
         status: format!(
-            "Ready v{} (hidraw) — advertise, then pair DeckLink BT; Desktop mouse = right stick",
+            "Ready v{} (hidraw2) — advertise, then pair DeckLink BT; Desktop mouse = right stick",
             env!("CARGO_PKG_VERSION")
         ),
         sticky_mods: 0,
@@ -172,21 +180,24 @@ async fn main() -> Result<()> {
 }
 
 async fn ensure_advertising(shared: &Arc<Mutex<Shared>>) -> Result<()> {
-    {
-        let g = shared.lock().unwrap();
-        if g.hogp.is_some() {
+    let name = {
+        let mut g = shared.lock().unwrap();
+        if g.hogp.is_some() || g.bt_starting {
             return Ok(());
         }
-    }
-    let name = { shared.lock().unwrap().store.config.device_name.clone() };
+        g.bt_starting = true;
+        g.store.config.device_name.clone()
+    };
 
     match start_hogp(name).await {
         Ok(server) => {
             {
                 let mut g = shared.lock().unwrap();
+                g.bt_starting = false;
                 g.advertising = true;
                 g.status =
-                    "Advertising as \"DeckLink BT\" — on the PC pair that name (not \"steamdeck\")".into();
+                    "Advertising as \"DeckLink BT\" — sticks silenced on Deck; pair that name on PC"
+                        .into();
                 g.hogp = Some(server);
             }
             sync_input_grab(shared);
@@ -195,9 +206,43 @@ async fn ensure_advertising(shared: &Arc<Mutex<Shared>>) -> Result<()> {
         }
         Err(e) => {
             let mut g = shared.lock().unwrap();
+            g.bt_starting = false;
             g.status = format!("Bluetooth error: {e}");
             Err(e.into())
         }
+    }
+}
+
+/// Exclusive flock so a second Desktop shortcut cannot steal grabs (EBUSY).
+fn acquire_instance_lock() -> Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let dir = dirs::data_local_dir()
+            .ok_or_else(|| anyhow::anyhow!("no data dir"))?
+            .join("decklink-bt");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("decklink.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&path)?;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            anyhow::bail!("lock busy");
+        }
+        return Ok(file);
+    }
+    #[cfg(not(unix))]
+    {
+        let dir = dirs::data_local_dir()
+            .ok_or_else(|| anyhow::anyhow!("no data dir"))?
+            .join("decklink-bt");
+        std::fs::create_dir_all(&dir)?;
+        Ok(std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(dir.join("decklink.lock"))?)
     }
 }
 

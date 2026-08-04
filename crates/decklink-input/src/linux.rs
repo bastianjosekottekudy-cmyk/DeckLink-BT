@@ -75,14 +75,24 @@ fn score_trackpad(name: &str) -> i32 {
 
 fn score_local_pointer(name: &str) -> i32 {
     let lower = name.to_ascii_lowercase();
-    if lower.contains("decklink") || lower.contains("power") || lower.contains("lid") {
+    if lower.contains("decklink")
+        || lower.contains("power")
+        || lower.contains("lid")
+        || lower.contains("video bus")
+        || lower.contains("hdmi")
+        || lower.contains("intel")
+        || lower.contains("sof-")
+        || lower.contains("hda")
+    {
         return -100;
     }
     if lower.contains("mouse")
         || lower.contains("touchpad")
         || lower.contains("trackpad")
         || lower.contains("extest")
-        || (lower.contains("uinput") && (lower.contains("mouse") || lower.contains("pointer")))
+        || lower.contains("xisible")
+        || (lower.contains("uinput")
+            && (lower.contains("mouse") || lower.contains("pointer") || lower.contains("event")))
     {
         return 100;
     }
@@ -100,11 +110,26 @@ fn score_local_pointer(name: &str) -> i32 {
     -100
 }
 
+fn device_has_rel_x(dev: &Device) -> bool {
+    dev.supported_relative_axes()
+        .is_some_and(|a| a.contains(RelativeAxisCode::REL_X))
+}
+
 /// Anything Steam/Deck uses to drive the *local* cursor — grab while advertising.
-fn should_silence(name: &str) -> bool {
-    score_local_pointer(name) > 0
-        || score_gamepad(name) > 0
-        || score_trackpad(name) > 0
+fn should_silence(name: &str, dev: Option<&Device>) -> bool {
+    if score_local_pointer(name) > 0 || score_gamepad(name) > 0 || score_trackpad(name) > 0 {
+        return true;
+    }
+    // Catch unnamed uinput / libei / Steam virtual pointers.
+    if let Some(d) = dev {
+        if device_has_rel_x(d) {
+            let lower = name.to_ascii_lowercase();
+            if !lower.contains("decklink") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn apply_key(state: &mut ControllerState, code: KeyCode, pressed: bool) {
@@ -199,27 +224,51 @@ fn role_name(role: DeviceRole) -> &'static str {
     }
 }
 
-fn open_silence_devices() -> Vec<(String, Device)> {
+fn open_silence_devices() -> Vec<(PathBuf, String, Device)> {
     let mut out = Vec::new();
     let mut used = HashSet::new();
     for (path, name) in list_devices() {
-        if !should_silence(&name) || !used.insert(path.clone()) {
+        if !used.insert(path.clone()) {
             continue;
         }
-        match Device::open(&path) {
-            Ok(d) => {
-                let _ = d.set_nonblocking(true);
-                info!("silence-open {} ({})", path.display(), name);
-                out.push((name, d));
-            }
-            Err(e) => warn!("silence-open {}: {e}", path.display()),
+        let Ok(d) = Device::open(&path) else {
+            continue;
+        };
+        if !should_silence(&name, Some(&d)) {
+            continue;
         }
+        let _ = d.set_nonblocking(true);
+        info!("silence-open {} ({})", path.display(), name);
+        out.push((path, name, d));
     }
     out
 }
 
-fn set_silence_exclusive(devs: &mut [(String, Device)], exclusive: bool, quiet: bool) {
-    for (name, dev) in devs.iter_mut() {
+/// Add any newly appeared pointer/gamepad nodes without releasing existing grabs.
+fn merge_new_silence_devices(devs: &mut Vec<(PathBuf, String, Device)>) {
+    let held: HashSet<PathBuf> = devs.iter().map(|(p, _, _)| p.clone()).collect();
+    for (path, name) in list_devices() {
+        if held.contains(&path) {
+            continue;
+        }
+        let Ok(mut d) = Device::open(&path) else {
+            continue;
+        };
+        if !should_silence(&name, Some(&d)) {
+            continue;
+        }
+        let _ = d.set_nonblocking(true);
+        match d.grab() {
+            Ok(()) => info!("exclusive grab (new silence) ({name}) {}", path.display()),
+            Err(e) => warn!("grab new silence ({name}) failed: {e}"),
+        }
+        info!("silence-open {} ({})", path.display(), name);
+        devs.push((path, name, d));
+    }
+}
+
+fn set_silence_exclusive(devs: &mut [(PathBuf, String, Device)], exclusive: bool, quiet: bool) {
+    for (_path, name, dev) in devs.iter_mut() {
         if exclusive {
             match dev.grab() {
                 Ok(()) => {
@@ -231,7 +280,11 @@ fn set_silence_exclusive(devs: &mut [(String, Device)], exclusive: bool, quiet: 
             }
         } else {
             match dev.ungrab() {
-                Ok(()) => info!("released silence grab ({name})"),
+                Ok(()) => {
+                    if !quiet {
+                        info!("released silence grab ({name})");
+                    }
+                }
                 Err(e) => warn!("ungrab silence ({name}) failed: {e}"),
             }
         }
@@ -239,8 +292,8 @@ fn set_silence_exclusive(devs: &mut [(String, Device)], exclusive: bool, quiet: 
 }
 
 /// Drain silence devices so the kernel queue does not back up (events discarded).
-fn drain_silence(devs: &mut [(String, Device)]) {
-    for (_name, dev) in devs.iter_mut() {
+fn drain_silence(devs: &mut [(PathBuf, String, Device)]) {
+    for (_path, _name, dev) in devs.iter_mut() {
         match dev.fetch_events() {
             Ok(evs) => {
                 for _ in evs {}
@@ -253,7 +306,7 @@ fn drain_silence(devs: &mut [(String, Device)]) {
 
 pub async fn spawn_input_task(
     tx: mpsc::Sender<InputEvent>,
-    mut cmd_rx: mpsc::Receiver<InputCommand>,
+    cmd_rx: mpsc::Receiver<InputCommand>,
 ) -> Result<(), InputError> {
     // Prefer hidraw: owns Deck reports and fights lizard/Steam Desktop mouse at the source.
     if let Some(deck) = hidraw_deck::open() {
@@ -283,35 +336,37 @@ async fn run_hidraw_loop(
             let InputCommand::SetExclusive(want) = cmd;
             if want != exclusive {
                 exclusive = want;
-                // Rescan — Steam may create new uinput mice after we start.
                 if exclusive {
-                    set_silence_exclusive(&mut silence, false, true);
+                    // Fresh open once when advertising starts, then keep grabs held.
                     silence = open_silence_devices();
-                }
-                set_silence_exclusive(&mut silence, exclusive, false);
-                if exclusive {
+                    set_silence_exclusive(&mut silence, true, false);
                     deck.feed_lizard();
                     hidraw_deck::set_kernel_lizard_mode(false);
+                    info!(
+                        "local pointer silence ON ({} devices) — grabs stay held",
+                        silence.len()
+                    );
                 } else {
+                    set_silence_exclusive(&mut silence, false, false);
                     hidraw_deck::set_kernel_lizard_mode(true);
+                    info!("local pointer silence OFF");
                 }
             }
         }
 
         state.clear_relative();
-        // clear_relative only clears dx/dy; re-poll fills the rest.
         let _got = deck.poll(&mut state);
         state.battery_pct = read_battery_percent();
 
         if exclusive {
             drain_silence(&mut silence);
-            if tick > 0 && tick % 80 == 0 {
-                // Steam respawns pointer devices — re-grab periodically.
-                set_silence_exclusive(&mut silence, false, true);
-                silence = open_silence_devices();
+            // Never ungrab while exclusive — that was letting Steam steal the cursor.
+            // Only attach newly appeared pointer nodes and re-assert grab on held FDs.
+            if tick > 0 && tick % 250 == 0 {
+                merge_new_silence_devices(&mut silence);
                 set_silence_exclusive(&mut silence, true, true);
                 deck.feed_lizard();
-            } else if tick % 40 == 0 {
+            } else if tick % 50 == 0 {
                 deck.feed_lizard();
             }
         }
@@ -367,7 +422,7 @@ async fn spawn_evdev_fallback(
     }
 
     for (path, name) in &devices {
-        if used_paths.contains(path) || !should_silence(name) {
+        if used_paths.contains(path) || !should_silence(name, None) {
             continue;
         }
         if score_gamepad(name) > 0 {

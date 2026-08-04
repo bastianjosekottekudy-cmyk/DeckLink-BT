@@ -61,23 +61,19 @@ fn idle_mouse_keyboard() -> Vec<HidPacket> {
 fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     let mut packets = Vec::new();
 
-    // Large deadzone: resting sticks must never produce host mouse motion.
+    // Right stick only for host mouse (large deadzone). Pad/Steam streams are
+    // too easy to mis-classify and pin the cursor in a corner.
     let mut mx = 0.0f32;
     let mut my = 0.0f32;
-    const STICK_DZ: f32 = 0.35;
+    const STICK_DZ: f32 = 0.40;
     if state.rx.abs() > STICK_DZ {
-        mx += (state.rx.signum() * (state.rx.abs() - STICK_DZ)) * 12.0;
+        mx += (state.rx.signum() * (state.rx.abs() - STICK_DZ)) * 10.0;
     }
     if state.ry.abs() > STICK_DZ {
-        my += (state.ry.signum() * (state.ry.abs() - STICK_DZ)) * 12.0;
+        my += (state.ry.signum() * (state.ry.abs() - STICK_DZ)) * 10.0;
     }
-    // Right-pad deltas from hidraw (already touch-gated upstream).
-    if state.trackpad_touch {
-        mx += state.trackpad_dx;
-        my += state.trackpad_dy;
-    }
-    let dx = mx.round().clamp(-20.0, 20.0) as i8;
-    let dy = my.round().clamp(-20.0, 20.0) as i8;
+    let dx = mx.round().clamp(-16.0, 16.0) as i8;
+    let dy = my.round().clamp(-16.0, 16.0) as i8;
     let mut buttons = MouseButtons::empty();
     if state.rt > 0.4 || state.trackpad_click {
         buttons |= MouseButtons::LEFT;
