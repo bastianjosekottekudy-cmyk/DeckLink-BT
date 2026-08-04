@@ -1,6 +1,6 @@
 use decklink_hid::{
     hid_key, ControllerState, GamepadButtons, HidPacket, KeyModifiers, KeyboardReport,
-    MouseButtons, MouseReport, GAMEPAD_REPORT_ID, KEYBOARD_REPORT_ID, MOUSE_REPORT_ID,
+    MouseButtons, MouseReport, KEYBOARD_REPORT_ID, MOUSE_REPORT_ID,
 };
 
 use crate::Profile;

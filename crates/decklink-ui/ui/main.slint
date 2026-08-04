@@ -129,6 +129,10 @@ export component MainWindow inherits Window {
 
     property <bool> km: selected-profile == 1;
     property <bool> input-ok: advertising || connected;
+    property <bool> mod-ctrl: mod(sticky-mods, 2) == 1;
+    property <bool> mod-shift: mod(sticky-mods / 2, 2) == 1;
+    property <bool> mod-alt: mod(sticky-mods / 4, 2) == 1;
+    property <bool> mod-win: mod(sticky-mods / 8, 2) == 1;
 
     VerticalBox {
         padding: 12px;
@@ -326,10 +330,10 @@ export component MainWindow inherits Window {
             // Mods + text + actions
             HorizontalBox {
                 spacing: 6px;
-                ModCap { label: "Ctrl"; mask: 1; active: (root.sticky-mods & 1) != 0; enabled: root.input-ok; toggled(m) => { root.mod-toggle(m); } }
-                ModCap { label: "Shift"; mask: 2; active: (root.sticky-mods & 2) != 0; enabled: root.input-ok; toggled(m) => { root.mod-toggle(m); } }
-                ModCap { label: "Alt"; mask: 4; active: (root.sticky-mods & 4) != 0; enabled: root.input-ok; toggled(m) => { root.mod-toggle(m); } }
-                ModCap { label: "Win"; mask: 8; active: (root.sticky-mods & 8) != 0; enabled: root.input-ok; toggled(m) => { root.mod-toggle(m); } }
+                ModCap { label: "Ctrl"; mask: 1; active: root.mod-ctrl; enabled: root.input-ok; toggled(m) => { root.mod-toggle(m); } }
+                ModCap { label: "Shift"; mask: 2; active: root.mod-shift; enabled: root.input-ok; toggled(m) => { root.mod-toggle(m); } }
+                ModCap { label: "Alt"; mask: 4; active: root.mod-alt; enabled: root.input-ok; toggled(m) => { root.mod-toggle(m); } }
+                ModCap { label: "Win"; mask: 8; active: root.mod-win; enabled: root.input-ok; toggled(m) => { root.mod-toggle(m); } }
                 LineEdit {
                     text <=> root.type-buffer;
                     placeholder-text: "Type to send…";

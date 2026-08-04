@@ -11,7 +11,7 @@ use tracing::{error, info, warn};
 use decklink_bt::{start_hogp, BtEvent, HogpServer};
 use decklink_hid::{
     hid_from_char, KeyModifiers, KeyboardReport, MouseButtons, MouseReport, HidPacket,
-    KEYBOARD_REPORT_ID, MOUSE_REPORT_ID,
+    MOUSE_REPORT_ID,
 };
 use decklink_input::{spawn_input_task, InputEvent};
 use decklink_profiles::{map_state, PairedTarget, Profile, ProfileStore};
