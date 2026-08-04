@@ -199,7 +199,7 @@ pub async fn spawn_input_task(tx: mpsc::Sender<InputEvent>) -> Result<(), InputE
 
     for (_score, path, name) in tracks.into_iter().take(2) {
         match Device::open(&path) {
-            Ok(mut d) => {
+            Ok(d) => {
                 let _ = d.set_nonblocking(true);
                 info!("opening trackpad {} ({})", path.display(), name);
                 opened.push((DeviceRole::Trackpad, name, d));

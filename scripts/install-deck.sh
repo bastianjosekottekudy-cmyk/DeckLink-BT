@@ -154,14 +154,14 @@ if command -v usermod >/dev/null 2>&1; then
 fi
 steamos_rw_end
 
-# --- Desktop entry -----------------------------------------------------------
+# --- Desktop entry (UI; overwrite with env-safe Exec even if steam helper fails) -
 APPS="${HOME}/.local/share/applications"
 mkdir -p "$APPS"
 cat > "${APPS}/decklink-bt.desktop" <<EOF
 [Desktop Entry]
 Name=DeckLink BT
-Comment=Steam Deck as a BLE gamepad
-Exec=${LAUNCH}
+Comment=Steam Deck as a BLE gamepad / keyboard+mouse
+Exec=env -u DECKLINK_GAMING_MODE WINIT_UNIX_BACKEND=x11 SLINT_BACKEND=winit ${LAUNCH} --advertise
 Icon=input-gaming
 Terminal=false
 Type=Application
@@ -180,6 +180,7 @@ echo "Done."
 echo "  Launch (Desktop UI): ${LAUNCH}"
 echo "  Launch (Gaming Mode Steam target): ${HOME}/.local/share/decklink-bt/DeckLink BT"
 echo "Remove any Steam shortcut still named launch.sh, then use 'DeckLink BT'."
+echo "Switch modes: Select+Start on Deck, or Xbox / Keyboard+Mouse tabs in the UI."
 echo "Then: Start Advertising / auto-advertise → pair from host Bluetooth settings."
 echo
 echo "If sudo/udev failed: open Konsole and re-run with a password prompt available."

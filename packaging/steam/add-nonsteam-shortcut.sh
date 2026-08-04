@@ -15,7 +15,7 @@ echo "==> Registering Non-Steam shortcut: ${NAME}"
 
 mkdir -p "$SHARE"
 
-# Gaming Mode launcher binary Steam will show as "DeckLink BT"
+# Gaming Mode launcher — tries Slint UI; app falls back to headless if gamescope blocks it
 cat > "$STEAM_LAUNCHER" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -23,8 +23,11 @@ export DECKLINK_GAMING_MODE=1
 mkdir -p "${SHARE}"
 unset LD_LIBRARY_PATH || true
 unset LD_PRELOAD || true
+# Prefer X11 nested window when gamescope exposes one
+export WINIT_UNIX_BACKEND="\${WINIT_UNIX_BACKEND:-x11}"
+export SLINT_BACKEND="\${SLINT_BACKEND:-winit}"
 bluetoothctl power on >/dev/null 2>&1 || true
-echo "\$(date -Iseconds) starting DeckLink BT (gaming/headless)" >> "${LOG}"
+echo "\$(date -Iseconds) starting DeckLink BT (gaming)" >> "${LOG}"
 exec "${LAUNCH_BIN}" --gaming >> "${LOG}" 2>&1
 EOF
 chmod +x "$STEAM_LAUNCHER"
@@ -81,6 +84,7 @@ echo "Gaming Mode checklist:"
 echo "  1. Remove any old shortcut named 'launch.sh' from Steam"
 echo "  2. Use shortcut '${NAME}' → Properties → Controller → Disable Steam Input"
 echo "  3. Launch '${NAME}', then pair/connect on the host"
-echo "  4. Logs:  cat ${LOG}"
+echo "  4. Switch Xbox ↔ Keyboard+Mouse: Select+Start (or UI tabs in Desktop Mode)"
+echo "  5. Logs:  cat ${LOG}"
 echo
 echo "Desktop Mode UI: application menu '${NAME}' or:  ${LAUNCH_BIN} --advertise"

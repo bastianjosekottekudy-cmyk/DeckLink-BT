@@ -10,8 +10,8 @@ use tracing::{error, info, warn};
 
 use decklink_bt::{start_hogp, BtEvent, HogpServer};
 use decklink_hid::{
-    hid_from_char, KeyModifiers, KeyboardReport, MouseButtons, MouseReport, HidPacket,
-    MOUSE_REPORT_ID,
+    hid_from_char, idle_release_packets, KeyModifiers, KeyboardReport, MouseButtons, MouseReport,
+    HidPacket, GamepadButtons, MOUSE_REPORT_ID,
 };
 use decklink_input::{spawn_input_task, InputEvent};
 use decklink_profiles::{map_state, PairedTarget, Profile, ProfileStore};
@@ -25,7 +25,7 @@ use slint::ComponentHandle;
     about = "Steam Deck as a driverless BLE HOGP gamepad"
 )]
 struct Cli {
-    /// Start without opening the Slint window (needed under Gaming Mode / gamescope)
+    /// Start without opening the Slint window (needed when gamescope blocks UI)
     #[arg(long)]
     headless: bool,
 
@@ -33,13 +33,13 @@ struct Cli {
     #[arg(long)]
     advertise: bool,
 
-    /// Gaming Mode preset: implies --headless --advertise
+    /// Gaming Mode preset: auto-advertise; opens UI when possible (falls back to headless)
     #[arg(long)]
     gaming: bool,
 
-    /// Profile: gamepad (Xbox) | desktop (keyboard+mouse)
-    #[arg(long, default_value = "gamepad")]
-    profile: String,
+    /// Override saved profile: gamepad (Xbox) | desktop (keyboard+mouse)
+    #[arg(long)]
+    profile: Option<String>,
 
     /// Override BLE local name
     #[arg(long)]
@@ -57,6 +57,8 @@ struct Shared {
     sticky_mods: u8,
     soft_mouse_buttons: u8,
     type_sent_len: usize,
+    /// Select+Start chord was held last frame (edge-trigger profile toggle).
+    profile_chord_held: bool,
 }
 
 #[tokio::main]
@@ -90,14 +92,14 @@ async fn main() -> Result<()> {
     }
 
     let mut cli = Cli::parse();
-    // Only force headless when explicitly requested — do not treat Desktop Plasma as Gaming Mode.
+    // Gaming Mode: advertise + try UI. Only --headless forces no window.
+    // Do not treat Desktop Plasma as Gaming Mode.
     let gaming_env = std::env::var("DECKLINK_GAMING_MODE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if cli.gaming || gaming_env {
-        cli.headless = true;
         cli.advertise = true;
-        info!("Gaming Mode profile: headless + advertise");
+        info!("Gaming Mode: advertise; UI unless --headless");
     }
 
     if !cli.headless {
@@ -110,8 +112,11 @@ async fn main() -> Result<()> {
     }
 
     let mut store = ProfileStore::load().context("load config")?;
-    if let Some(p) = Profile::parse(&cli.profile) {
-        store.set_profile(p);
+    // Only override saved profile when --profile is passed explicitly.
+    if let Some(ref s) = cli.profile {
+        if let Some(p) = Profile::parse(s) {
+            store.set_profile(p);
+        }
     }
     if let Some(name) = &cli.name {
         store.config.device_name = name.clone();
@@ -132,10 +137,11 @@ async fn main() -> Result<()> {
         advertising: false,
         connected: false,
         peer_name: "—".into(),
-        status: "Ready".into(),
+        status: "Ready — Select+Start toggles Xbox / Keyboard+Mouse".into(),
         sticky_mods: 0,
         soft_mouse_buttons: 0,
         type_sent_len: 0,
+        profile_chord_held: false,
     }));
 
     if cli.headless {
@@ -227,6 +233,9 @@ async fn run_headless(
 }
 
 async fn pump_reports(shared: &Arc<Mutex<Shared>>, state: &decklink_hid::ControllerState) {
+    if maybe_toggle_profile_chord(shared, state).await {
+        // Chord consumed this frame — still map with the new profile below.
+    }
     let (packets, report_tx) = {
         let g = shared.lock().unwrap();
         let profile = g.store.config.active_profile;
@@ -241,6 +250,54 @@ async fn pump_reports(shared: &Arc<Mutex<Shared>>, state: &decklink_hid::Control
         for pkt in packets {
             let _ = tx.send(pkt).await;
         }
+    }
+}
+
+/// Select + Start (View + Menu on Deck) toggles Xbox ↔ Keyboard+Mouse without re-pair.
+async fn maybe_toggle_profile_chord(
+    shared: &Arc<Mutex<Shared>>,
+    state: &decklink_hid::ControllerState,
+) -> bool {
+    let chord = state.buttons.contains(GamepadButtons::SELECT)
+        && state.buttons.contains(GamepadButtons::START);
+    let should_switch = {
+        let mut g = shared.lock().unwrap();
+        if chord && !g.profile_chord_held {
+            g.profile_chord_held = true;
+            true
+        } else {
+            if !chord {
+                g.profile_chord_held = false;
+            }
+            false
+        }
+    };
+    if !should_switch {
+        return false;
+    }
+    apply_profile_switch(shared, None).await;
+    true
+}
+
+/// Switch profile (or toggle if `to` is None), flush idle HID, clear soft sticky state.
+async fn apply_profile_switch(shared: &Arc<Mutex<Shared>>, to: Option<Profile>) {
+    let next = {
+        let mut g = shared.lock().unwrap();
+        let next = to.unwrap_or_else(|| match g.store.config.active_profile {
+            Profile::Gamepad => Profile::Desktop,
+            Profile::Desktop => Profile::Gamepad,
+        });
+        g.store.set_profile(next);
+        g.sticky_mods = 0;
+        g.soft_mouse_buttons = 0;
+        g.type_sent_len = 0;
+        g.status = format!("Profile: {next} — Select+Start to toggle");
+        let _ = g.store.save();
+        next
+    };
+    info!("profile switch → {next}");
+    for pkt in idle_release_packets() {
+        hogp_send(shared, pkt).await;
     }
 }
 
@@ -315,13 +372,9 @@ fn run_ui(shared: Arc<Mutex<Shared>>, mut input_rx: mpsc::Receiver<InputEvent>) 
         });
     }
     {
-        let shared_prof = shared.clone();
+        let tx = cmd_tx.clone();
         ui.on_profile_changed(move |idx| {
-            let mut g = shared_prof.lock().unwrap();
-            let p = profile_from_index(idx);
-            g.store.set_profile(p);
-            g.status = format!("Profile: {p}");
-            let _ = g.store.save();
+            let _ = tx.send(UiCommand::SetProfile(idx));
         });
     }
     {
@@ -396,6 +449,10 @@ fn run_ui(shared: Arc<Mutex<Shared>>, mut input_rx: mpsc::Receiver<InputEvent>) 
                             UiCommand::StopAdvertise => {
                                 stop_advertising(&shared_bg).await;
                             }
+                            UiCommand::SetProfile(idx) => {
+                                apply_profile_switch(&shared_bg, Some(profile_from_index(idx)))
+                                    .await;
+                            }
                             UiCommand::KeyTap(code) => {
                                 soft_key_tap(&shared_bg, code).await;
                             }
@@ -446,6 +503,7 @@ fn run_ui(shared: Arc<Mutex<Shared>>, mut input_rx: mpsc::Receiver<InputEvent>) 
 enum UiCommand {
     StartAdvertise,
     StopAdvertise,
+    SetProfile(i32),
     KeyTap(u8),
     ModToggle(u8),
     MouseDelta(f32, f32),

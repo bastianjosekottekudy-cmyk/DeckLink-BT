@@ -135,7 +135,7 @@ fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use decklink_hid::GAMEPAD_REPORT_ID;
+    use decklink_hid::{idle_release_packets, GAMEPAD_REPORT_ID};
 
     #[test]
     fn gamepad_emits_one_packet() {
@@ -155,5 +155,18 @@ mod tests {
         assert_eq!(o.packets[0].report_id, MOUSE_REPORT_ID);
         assert_eq!(o.packets[1].report_id, KEYBOARD_REPORT_ID);
         assert_eq!(o.packets[1].data[2], hid_key::ENTER);
+    }
+
+    #[test]
+    fn idle_release_clears_all_collections() {
+        let pkts = idle_release_packets();
+        assert_eq!(pkts.len(), 3);
+        assert_eq!(pkts[0].report_id, GAMEPAD_REPORT_ID);
+        assert_eq!(pkts[1].report_id, MOUSE_REPORT_ID);
+        assert_eq!(pkts[2].report_id, KEYBOARD_REPORT_ID);
+        // Neutral gamepad: hat nibble = 8 (center)
+        assert_eq!(pkts[0].data[2], 8);
+        assert!(pkts[1].data.iter().all(|&b| b == 0));
+        assert!(pkts[2].data.iter().all(|&b| b == 0));
     }
 }

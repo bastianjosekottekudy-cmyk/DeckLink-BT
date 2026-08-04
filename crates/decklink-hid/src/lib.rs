@@ -32,3 +32,21 @@ impl HidPacket {
         out
     }
 }
+
+/// Neutral reports for gamepad + mouse + keyboard (clears sticky host state on profile switch).
+pub fn idle_release_packets() -> Vec<HidPacket> {
+    vec![
+        HidPacket {
+            report_id: GAMEPAD_REPORT_ID,
+            data: GamepadReport::default().pack().to_vec(),
+        },
+        HidPacket {
+            report_id: MOUSE_REPORT_ID,
+            data: MouseReport::default().pack().to_vec(),
+        },
+        HidPacket {
+            report_id: KEYBOARD_REPORT_ID,
+            data: KeyboardReport::default().pack().to_vec(),
+        },
+    ]
+}
