@@ -18,8 +18,15 @@ DESKTOP_FILE_NAME="decklink-bt.desktop"
 
 echo "==> DeckLink BT installer"
 # Stop any running copy so the new binary can replace grabs/locks.
+# Do NOT pkill -f 'decklink-bt' — that matches this installer's argv
+# (./decklink-bt-linux-….tar.gz) and SIGTERMs the script (exit 143).
 pkill -x decklink-bt 2>/dev/null || true
-pkill -f '/decklink-bt' 2>/dev/null || true
+if [[ -x "${HOME}/.local/bin/decklink-bt" ]]; then
+  pkill -f "${HOME}/.local/bin/decklink-bt" 2>/dev/null || true
+fi
+if [[ -x "${HOME}/.local/share/decklink-bt/decklink-bt" ]]; then
+  pkill -f "${HOME}/.local/share/decklink-bt/decklink-bt" 2>/dev/null || true
+fi
 sleep 0.5
 # Rotate old log so a fresh session is obvious.
 if [[ -f "${HOME}/.local/share/decklink-bt/decklink.log" ]]; then
@@ -238,11 +245,9 @@ echo "  App menu: DeckLink BT"
 echo "  Desktop shortcut: ~/Desktop/${DESKTOP_FILE_NAME}"
 echo "  Binary: ${LAUNCH}"
 if [[ -x "$LAUNCH" ]]; then
-  echo -n "  Version check: "
-  "$LAUNCH" --help 2>&1 | head -1 || true
-  ls -la "$LAUNCH" | awk '{print "  mtime/size:", $6,$7,$8,$5}'
+  ls -la "$LAUNCH" | awk '{print "  binary:", $0}'
 fi
-echo "  Status bar must say Ready v1.0.1 — if not, install failed."
+echo "  After open: status bar must say Ready v1.0.1 — if not, install failed."
 echo "  On PC: Forget ALL steamdeck + DeckLink BT bonds, then pair DeckLink BT only."
 echo
 echo "If sudo/udev failed: open Konsole and re-run with a password prompt available."

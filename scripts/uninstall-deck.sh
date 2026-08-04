@@ -27,9 +27,8 @@ steamos_rw_end() {
 }
 trap steamos_rw_end EXIT
 
-# Stop running process if any
+# Stop running process if any (exact name only — broad -f matches this script argv)
 pkill -x decklink-bt 2>/dev/null || true
-pkill -f '[d]ecklink-bt' 2>/dev/null || true
 sleep 0.3 || true
 
 # --- Core install locations --------------------------------------------------
