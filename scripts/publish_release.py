@@ -121,10 +121,15 @@ def wsl_available() -> bool:
 
 
 def windows_to_wsl_path(path: Path) -> str:
-    r = run(["wsl", "wslpath", "-a", str(path)], check=False)
+    # Forward slashes so WSL does not eat backslashes when argv is parsed.
+    win = str(path.resolve()).replace("\\", "/")
+    r = run(["wsl", "wslpath", "-a", win], check=False)
     if r.returncode != 0:
         die((r.stderr or r.stdout or "wslpath failed").strip())
-    return (r.stdout or "").strip()
+    out = (r.stdout or "").strip()
+    if not out.startswith("/"):
+        die(f"wslpath returned unexpected path: {out!r}")
+    return out
 
 
 def build_linux_tarball() -> Path:
@@ -133,36 +138,16 @@ def build_linux_tarball() -> Path:
     if os.name == "nt":
         if not wsl_available():
             die("WSL required on Windows to build the Linux Steam Deck binary")
-        wsl_root = windows_to_wsl_path(ROOT)
-        script = f"""
-set -euo pipefail
-cd '{wsl_root}'
-export PATH="$HOME/.cargo/bin:/usr/local/cargo/bin:$PATH"
-if ! command -v cargo >/dev/null 2>&1; then
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-  . "$HOME/.cargo/env"
-fi
-# Best-effort deps (ignore if already installed / no sudo)
-sudo -n apt-get update -qq 2>/dev/null || true
-sudo -n apt-get install -y -qq build-essential pkg-config libdbus-1-dev libudev-dev \\
-  libxkbcommon-dev libwayland-dev libegl1-mesa-dev libx11-dev libxcursor-dev \\
-  libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev libfreetype6-dev 2>/dev/null || true
-cargo test -p decklink-hid -p decklink-profiles
-cargo build --release -p decklink-app
-STAGE='dist/{STAGE_NAME}'
-rm -rf "$STAGE"
-mkdir -p "$STAGE"
-cp target/release/decklink-bt "$STAGE/"
-cp README.md LICENSE LICENSE-MIT LICENSE-APACHE "$STAGE/" 2>/dev/null || cp README.md LICENSE "$STAGE/"
-cp -r scripts packaging "$STAGE/"
-chmod +x "$STAGE/decklink-bt"
-find "$STAGE/scripts" "$STAGE/packaging" -type f -name '*.sh' -exec chmod +x {{}} +
-tar -czf 'dist/{TARBALL_NAME}' -C dist '{STAGE_NAME}'
-ls -la 'dist/{TARBALL_NAME}'
-"""
-        print("+ wsl bash -lc <build>", flush=True)
+        script = ROOT / "scripts" / "wsl_build_release.sh"
+        if not script.is_file():
+            die(f"missing {script}")
+        # Normalize line endings for bash
+        text = script.read_text(encoding="utf-8").replace("\r\n", "\n")
+        script.write_text(text, encoding="utf-8")
+        wsl_script = windows_to_wsl_path(script)
+        print(f"+ wsl bash {wsl_script}", flush=True)
         proc = subprocess.run(
-            ["wsl", "bash", "-lc", script],
+            ["wsl", "bash", wsl_script],
             cwd=str(ROOT),
             text=True,
         )

@@ -1254,6 +1254,7 @@ dependencies = [
  "async-trait",
  "bluer",
  "decklink-hid",
+ "futures",
  "serde",
  "thiserror 2.0.19",
  "tokio",
