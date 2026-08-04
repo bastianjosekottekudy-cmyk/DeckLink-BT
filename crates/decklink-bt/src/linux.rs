@@ -10,7 +10,8 @@ use bluer::gatt::local::{
     CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod, Descriptor,
     DescriptorRead, Service,
 };
-use bluer::{AdapterEvent, Session, Uuid, UuidExt};
+use bluer::{AdapterEvent, Session, Uuid};
+use futures::StreamExt;
 use tokio::sync::{mpsc, watch, Mutex};
 use tracing::{info, warn};
 
@@ -18,19 +19,24 @@ use decklink_hid::{HidPacket, APPEARANCE_GAMEPAD, HID_REPORT_MAP};
 
 use crate::{BtError, BtEvent, HogpServer};
 
-const UUID_HID: Uuid = Uuid::from_u16(0x1812);
-const UUID_DIS: Uuid = Uuid::from_u16(0x180A);
-const UUID_BATTERY: Uuid = Uuid::from_u16(0x180F);
-const UUID_HID_INFO: Uuid = Uuid::from_u16(0x2A4A);
-const UUID_REPORT_MAP: Uuid = Uuid::from_u16(0x2A4B);
-const UUID_HID_CTRL: Uuid = Uuid::from_u16(0x2A4C);
-const UUID_REPORT: Uuid = Uuid::from_u16(0x2A4D);
-const UUID_PROTOCOL_MODE: Uuid = Uuid::from_u16(0x2A4E);
-const UUID_REPORT_REF: Uuid = Uuid::from_u16(0x2908);
-const UUID_MANUFACTURER: Uuid = Uuid::from_u16(0x2A29);
-const UUID_MODEL: Uuid = Uuid::from_u16(0x2A24);
-const UUID_PNP_ID: Uuid = Uuid::from_u16(0x2A50);
-const UUID_BATTERY_LEVEL: Uuid = Uuid::from_u16(0x2A19);
+/// Bluetooth SIG 16-bit UUID → full 128-bit UUID (const-safe).
+const fn uuid16(u: u16) -> Uuid {
+    Uuid::from_u128(((u as u128) << 96) | 0x0000_1000_8000_0080_5f9b_34fb)
+}
+
+const UUID_HID: Uuid = uuid16(0x1812);
+const UUID_DIS: Uuid = uuid16(0x180A);
+const UUID_BATTERY: Uuid = uuid16(0x180F);
+const UUID_HID_INFO: Uuid = uuid16(0x2A4A);
+const UUID_REPORT_MAP: Uuid = uuid16(0x2A4B);
+const UUID_HID_CTRL: Uuid = uuid16(0x2A4C);
+const UUID_REPORT: Uuid = uuid16(0x2A4D);
+const UUID_PROTOCOL_MODE: Uuid = uuid16(0x2A4E);
+const UUID_REPORT_REF: Uuid = uuid16(0x2908);
+const UUID_MANUFACTURER: Uuid = uuid16(0x2A29);
+const UUID_MODEL: Uuid = uuid16(0x2A24);
+const UUID_PNP_ID: Uuid = uuid16(0x2A50);
+const UUID_BATTERY_LEVEL: Uuid = uuid16(0x2A19);
 
 fn report_characteristic(
     report_id: u8,
@@ -64,7 +70,6 @@ fn report_characteristic(
                             }
                         }
                     });
-                    Ok(())
                 })
             })),
             ..Default::default()
@@ -290,7 +295,6 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                                             }
                                         }
                                     });
-                                    Ok(())
                                 })
                             }
                         })),
@@ -338,7 +342,7 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
     let event_tx2 = event_tx.clone();
     let adapter2 = adapter.clone();
     tokio::spawn(async move {
-        while let Some(evt) = device_events.recv().await {
+        while let Some(evt) = device_events.next().await {
             match evt {
                 AdapterEvent::DeviceAdded(addr) => {
                     if let Ok(dev) = adapter2.device(addr) {
