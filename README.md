@@ -35,6 +35,29 @@ bash decklink-bt-linux-x86_64/scripts/install-deck.sh ./decklink-bt-linux-x86_64
 
 Use `bash …` (not `./scripts/…`) so a missing execute bit cannot cause “Permission denied”. Enter your sudo password when prompted (udev + SteamOS read-only unlock).
 
+### Uninstall
+
+```bash
+# From an extracted release folder, or from a git clone:
+bash scripts/uninstall-deck.sh
+```
+
+Or paste this in Konsole (Desktop Mode) to wipe everything without the script:
+
+```bash
+pkill -x decklink-bt 2>/dev/null || true
+rm -rf ~/.local/share/decklink-bt ~/.config/decklink-bt
+rm -f ~/.local/bin/decklink-bt ~/.local/share/applications/decklink-bt.desktop
+rm -rf ~/homebrew/plugins/decklink_bt
+# udev (SteamOS may ask to unlock read-only):
+sudo steamos-readonly disable 2>/dev/null || true
+sudo rm -f /etc/udev/rules.d/99-decklink-bt.rules
+sudo udevadm control --reload-rules; sudo udevadm trigger
+sudo steamos-readonly enable 2>/dev/null || true
+```
+
+Then in Steam: remove the **DeckLink BT** Non-Steam shortcut. On the host: Bluetooth → Forget **DeckLink BT**.
+
 3. Follow the **Gaming Mode checklist** below (Steam Input must be disabled).
 
 ### Build from source on Deck
