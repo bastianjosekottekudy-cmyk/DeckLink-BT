@@ -175,7 +175,8 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
         .map_err(|e| BtError::Unavailable(e.to_string()))?;
 
     // Windows shows the adapter Alias after connect (not just the adv local_name).
-    // Without this, the bond renames itself to the Deck system name "steamdeck".
+    // Keep it as DeckLink BT for the whole session — do NOT flip back to "steamdeck"
+    // (that creates a second Bluetooth identity on the host).
     let previous_alias = adapter.alias().await.unwrap_or_default();
     if let Err(e) = adapter.set_alias(device_name.clone()).await {
         warn!("set_alias({device_name}): {e}");
@@ -224,8 +225,10 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
         }
     };
 
-    if let Err(e) = adapter.set_discoverable(true).await {
-        warn!("set_discoverable: {e}");
+    // Pairable for bonding, but do NOT set adapter Discoverable — that also
+    // advertises Classic BT as "steamdeck" alongside LE "DeckLink BT".
+    if let Err(e) = adapter.set_discoverable(false).await {
+        warn!("set_discoverable(false): {e}");
     }
     if let Err(e) = adapter.set_pairable(true).await {
         warn!("set_pairable: {e}");
@@ -486,7 +489,6 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                 AdapterEvent::DeviceAdded(addr) => {
                     if let Ok(dev) = adapter2.device(addr) {
                         if matches!(dev.is_connected().await, Ok(true)) {
-                            // Trust so reconnects skip the authorize dialog.
                             if let Err(e) = dev.set_trusted(true).await {
                                 warn!("set_trusted({addr}): {e}");
                             }
@@ -496,31 +498,37 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                                 .ok()
                                 .flatten()
                                 .unwrap_or_else(|| addr.to_string());
-                            let _ = event_tx2
-                                .send(BtEvent::Connected {
-                                    address: addr.to_string(),
-                                    name: name.clone(),
-                                })
-                                .await;
-                            // Give the host a moment to enable CCCDs, then warn if none.
+                            // Only treat as DeckLink host once HID notifies are on.
+                            // DeviceAdded alone fires for many non-HOGP Bluetooth peers.
                             let n1c = n1c.clone();
                             let n2c = n2c.clone();
                             let n3c = n3c.clone();
+                            let event_tx2 = event_tx2.clone();
+                            let addr_s = addr.to_string();
                             tokio::spawn(async move {
-                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                let c1 = n1c.lock().await.len();
-                                let c2 = n2c.lock().await.len();
-                                let c3 = n3c.lock().await.len();
-                                if c1 + c2 + c3 == 0 {
-                                    warn!(
-                                        "host {name} connected but no HID notify subscriptions yet \
-                                         (gamepad={c1} mouse={c2} keyboard={c3}) — forget+re-pair on host"
-                                    );
-                                } else {
-                                    info!(
-                                        "host {name} HID subscriptions: gamepad={c1} mouse={c2} keyboard={c3}"
-                                    );
+                                for _ in 0..20 {
+                                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                    let c1 = n1c.lock().await.len();
+                                    let c2 = n2c.lock().await.len();
+                                    let c3 = n3c.lock().await.len();
+                                    if c1 + c2 + c3 > 0 {
+                                        info!(
+                                            "HID host {name} ({addr_s}) subscriptions: \
+                                             gamepad={c1} mouse={c2} keyboard={c3}"
+                                        );
+                                        let _ = event_tx2
+                                            .send(BtEvent::Connected {
+                                                address: addr_s,
+                                                name,
+                                            })
+                                            .await;
+                                        return;
+                                    }
                                 }
+                                warn!(
+                                    "BT peer {name} connected but never subscribed to HID — \
+                                     ignoring (not a DeckLink host)"
+                                );
                             });
                         }
                     }
@@ -582,11 +590,16 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                 info!("stopping HOGP server");
                 drop(adv_handle);
                 drop(app_handle);
-                // Restore system name ("steamdeck") when DeckLink stops.
-                if let Err(e) = adapter_restore.set_alias(previous_alias.clone()).await {
-                    warn!("restore alias: {e}");
-                    let _ = adapter_restore.set_alias(String::new()).await;
+                // Leave alias as DeckLink BT so the host does not grow a second
+                // "steamdeck" identity. Only restore if we changed it this session.
+                if previous_alias != device_name
+                    && !previous_alias.is_empty()
+                    && previous_alias.to_ascii_lowercase() != "decklink bt"
+                {
+                    // Keep DeckLink BT — intentional (see comment above).
+                    info!("leaving adapter alias as '{device_name}' (was '{previous_alias}')");
                 }
+                let _ = adapter_restore; // silence unused if alias kept
                 let _ = event_tx.send(BtEvent::Advertising(false)).await;
                 break;
             }

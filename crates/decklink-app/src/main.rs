@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
         connected: false,
         peer_name: "—".into(),
         status: format!(
-            "Ready v{} (hidraw2) — advertise, then pair DeckLink BT; Desktop mouse = right stick",
+            "Ready v{} — pair ONLY \"DeckLink BT\" (not steamdeck). Desktop mouse = right stick.",
             env!("CARGO_PKG_VERSION")
         ),
         sticky_mods: 0,

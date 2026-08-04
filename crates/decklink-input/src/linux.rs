@@ -342,14 +342,16 @@ async fn run_hidraw_loop(
                     set_silence_exclusive(&mut silence, true, false);
                     deck.feed_lizard();
                     hidraw_deck::set_kernel_lizard_mode(false);
+                    crate::steam_freeze::set_steam_frozen(true);
                     info!(
-                        "local pointer silence ON ({} devices) — grabs stay held",
+                        "local pointer silence ON ({} devices) — grabs held, Steam frozen",
                         silence.len()
                     );
                 } else {
                     set_silence_exclusive(&mut silence, false, false);
                     hidraw_deck::set_kernel_lizard_mode(true);
-                    info!("local pointer silence OFF");
+                    crate::steam_freeze::set_steam_frozen(false);
+                    info!("local pointer silence OFF — Steam resumed");
                 }
             }
         }
@@ -380,6 +382,7 @@ async fn run_hidraw_loop(
 
     set_silence_exclusive(&mut silence, false, false);
     hidraw_deck::set_kernel_lizard_mode(true);
+    crate::steam_freeze::set_steam_frozen(false);
 }
 
 async fn spawn_evdev_fallback(

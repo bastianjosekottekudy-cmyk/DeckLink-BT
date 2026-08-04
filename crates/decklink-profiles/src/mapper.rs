@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use decklink_hid::{
     hid_key, idle_release_packets, ControllerState, GamepadButtons, HidPacket, KeyModifiers,
     KeyboardReport, MouseButtons, MouseReport, GAMEPAD_REPORT_ID, KEYBOARD_REPORT_ID,
@@ -5,6 +7,8 @@ use decklink_hid::{
 };
 
 use crate::Profile;
+
+static LAST_MOUSE_BUTTONS: AtomicU8 = AtomicU8::new(0);
 
 /// Alias kept for UI / docs clarity.
 pub type ProfileKind = Profile;
@@ -28,18 +32,16 @@ pub fn map_state(profile: Profile, state: &ControllerState) -> MappedOutput {
 
     match profile {
         Profile::Gamepad => {
+            // Gamepad only — do not stream idle mouse/keyboard (Windows BLE mouse spam).
+            // Profile switch still flushes idle_release_packets() from the app.
             out.packets.push(state.gamepad_packet());
-            // Keep mouse/keyboard endpoints alive (idle) for instant profile switch.
-            out.packets.extend(idle_mouse_keyboard());
         }
         Profile::Desktop => {
-            // Keep gamepad endpoint alive (neutral) while KM is active.
             out.packets.push(idle_gamepad());
             out.packets.extend(map_keyboard_mouse(state));
         }
     }
 
-    debug_assert_eq!(out.packets.len(), 3);
     out
 }
 
@@ -50,14 +52,7 @@ fn idle_gamepad() -> HidPacket {
         .expect("idle gamepad")
 }
 
-fn idle_mouse_keyboard() -> Vec<HidPacket> {
-    idle_release_packets()
-        .into_iter()
-        .filter(|p| p.report_id == MOUSE_REPORT_ID || p.report_id == KEYBOARD_REPORT_ID)
-        .collect()
-}
-
-/// Keyboard & Mouse: right stick (primary) + right-pad deltas; face/D-pad/left-stick → keys.
+/// Keyboard & Mouse: right stick → mouse; face/D-pad/left-stick → keys.
 fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     let mut packets = Vec::new();
 
@@ -84,17 +79,22 @@ fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     if state.buttons.contains(GamepadButtons::R3) {
         buttons |= MouseButtons::MIDDLE;
     }
-    // Always notify so button releases reach the host
-    let mouse = MouseReport {
-        buttons,
-        dx,
-        dy,
-        wheel: 0,
-    };
-    packets.push(HidPacket {
-        report_id: MOUSE_REPORT_ID,
-        data: mouse.pack().to_vec(),
-    });
+    let btn_bits = buttons.bits();
+    let prev_btns = LAST_MOUSE_BUTTONS.swap(btn_bits, Ordering::Relaxed);
+    // Emit on motion, pressed buttons, or button release edge (clear host buttons).
+    if dx != 0 || dy != 0 || btn_bits != 0 || prev_btns != 0 {
+        packets.push(HidPacket {
+            report_id: MOUSE_REPORT_ID,
+            data: MouseReport {
+                buttons,
+                dx,
+                dy,
+                wheel: 0,
+            }
+            .pack()
+            .to_vec(),
+        });
+    }
 
     let mut kb = KeyboardReport::default();
     if state.buttons.contains(GamepadButtons::L1) {
@@ -171,26 +171,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gamepad_emits_all_three_collections() {
+    fn gamepad_emits_gamepad_only() {
         let s = ControllerState::default();
         let o = map_state(Profile::Gamepad, &s);
-        assert_eq!(o.packets.len(), 3);
+        assert_eq!(o.packets.len(), 1);
         assert_eq!(o.packets[0].report_id, GAMEPAD_REPORT_ID);
-        assert_eq!(o.packets[1].report_id, MOUSE_REPORT_ID);
-        assert_eq!(o.packets[2].report_id, KEYBOARD_REPORT_ID);
     }
 
     #[test]
-    fn keyboard_mouse_emits_all_three_collections() {
+    fn keyboard_mouse_emits_gamepad_and_keyboard() {
         let mut s = ControllerState::default();
-        s.trackpad_dx = 2.0;
+        s.rx = 0.9; // past mouse deadzone
         s.buttons.insert(GamepadButtons::A);
         let o = map_state(Profile::Desktop, &s);
-        assert_eq!(o.packets.len(), 3);
+        assert!(o.packets.len() >= 2);
         assert_eq!(o.packets[0].report_id, GAMEPAD_REPORT_ID);
-        assert_eq!(o.packets[1].report_id, MOUSE_REPORT_ID);
-        assert_eq!(o.packets[2].report_id, KEYBOARD_REPORT_ID);
-        assert_eq!(o.packets[2].data[2], hid_key::ENTER);
+        assert!(o
+            .packets
+            .iter()
+            .any(|p| p.report_id == KEYBOARD_REPORT_ID
+                && p.data.get(2) == Some(&hid_key::ENTER)));
+        assert!(o.packets.iter().any(|p| p.report_id == MOUSE_REPORT_ID));
     }
 
     #[test]

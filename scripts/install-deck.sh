@@ -17,6 +17,15 @@ STEAMOS_RO_TOUCHED=0
 DESKTOP_FILE_NAME="decklink-bt.desktop"
 
 echo "==> DeckLink BT installer"
+# Stop any running copy so the new binary can replace grabs/locks.
+pkill -x decklink-bt 2>/dev/null || true
+pkill -f '/decklink-bt' 2>/dev/null || true
+sleep 0.5
+# Rotate old log so a fresh session is obvious.
+if [[ -f "${HOME}/.local/share/decklink-bt/decklink.log" ]]; then
+  mv -f "${HOME}/.local/share/decklink-bt/decklink.log" \
+    "${HOME}/.local/share/decklink-bt/decklink.log.bak" 2>/dev/null || true
+fi
 
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
@@ -228,9 +237,13 @@ echo "Done. Desktop Mode only."
 echo "  App menu: DeckLink BT"
 echo "  Desktop shortcut: ~/Desktop/${DESKTOP_FILE_NAME}"
 echo "  Binary: ${LAUNCH}"
-echo "  Switch Xbox / Keyboard+Mouse: UI tabs or Select+Start"
-echo "  Pair: open app (auto-advertise) then add Bluetooth device on the host."
-echo "  If host connects but no input: Forget DeckLink BT on host, then re-pair."
+if [[ -x "$LAUNCH" ]]; then
+  echo -n "  Version check: "
+  "$LAUNCH" --help 2>&1 | head -1 || true
+  ls -la "$LAUNCH" | awk '{print "  mtime/size:", $6,$7,$8,$5}'
+fi
+echo "  Status bar must say Ready v1.0.1 — if not, install failed."
+echo "  On PC: Forget ALL steamdeck + DeckLink BT bonds, then pair DeckLink BT only."
 echo
 echo "If sudo/udev failed: open Konsole and re-run with a password prompt available."
 echo "If Permission denied on the script: bash scripts/install-deck.sh ./decklink-bt-linux-x86_64.tar.gz"
