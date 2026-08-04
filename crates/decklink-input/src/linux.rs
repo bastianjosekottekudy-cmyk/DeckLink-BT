@@ -183,13 +183,30 @@ fn norm_trigger(value: i32, min: i32, max: i32) -> f32 {
 fn open_device(path: &PathBuf, name: &str, role: DeviceRole) -> Result<Device, String> {
     let d = Device::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let _ = d.set_nonblocking(true);
-    let role_name = match role {
-        DeviceRole::Gamepad => "gamepad",
-        DeviceRole::Trackpad => "trackpad",
-        DeviceRole::LocalPointer => "local-pointer",
-    };
-    info!("opened {role_name} {} ({name})", path.display());
+    info!("opened {} {} ({name})", role_name(role), path.display());
     Ok(d)
+}
+
+/// Valve (0x28DE) interfaces that look like mouse/keyboard — grab to stop Desktop cursor.
+fn looks_like_valve_pointer(dev: &Device, name: &str) -> bool {
+    if score_local_pointer(name) > 0 {
+        return true;
+    }
+    let id = dev.input_id();
+    if id.vendor() != 0x28DE {
+        return false;
+    }
+    // Virtual Steam gamepad is 0x11FF — leave that as gamepad, not pointer.
+    if id.product() == 0x11FF {
+        return false;
+    }
+    let lower = name.to_ascii_lowercase();
+    lower.contains("mouse")
+        || lower.contains("keyboard")
+        || lower.contains("consumer")
+        || dev
+            .supported_relative_axes()
+            .is_some_and(|a| a.contains(RelativeAxisCode::REL_X))
 }
 
 fn role_name(role: DeviceRole) -> &'static str {
@@ -290,12 +307,33 @@ pub async fn spawn_input_task(
         }
     }
 
-    for (_score, path, name) in locals.into_iter().take(4) {
+    for (_score, path, name) in locals.into_iter().take(6) {
         if !used_paths.insert(path.clone()) {
             continue;
         }
         match open_device(&path, &name, DeviceRole::LocalPointer) {
             Ok(d) => opened.push((DeviceRole::LocalPointer, name, d)),
+            Err(e) => warn!("{e}"),
+        }
+    }
+
+    // Second pass: any remaining Valve mouse/keyboard nodes missed by name scoring.
+    for (path, name) in &devices {
+        if used_paths.contains(path) {
+            continue;
+        }
+        let Ok(probe) = Device::open(path) else {
+            continue;
+        };
+        if !looks_like_valve_pointer(&probe, name) {
+            continue;
+        }
+        drop(probe);
+        if !used_paths.insert(path.clone()) {
+            continue;
+        }
+        match open_device(path, name, DeviceRole::LocalPointer) {
+            Ok(d) => opened.push((DeviceRole::LocalPointer, name.clone(), d)),
             Err(e) => warn!("{e}"),
         }
     }
@@ -381,36 +419,9 @@ pub async fn spawn_input_task(
 
                 for ev in events {
                     got_event = true;
-                    // Grabbed lizard/Steam mouse: keep off the Deck Desktop, forward to host.
+                    // Swallow lizard/Steam Desktop pointer (often stick→mouse).
+                    // Never forward it to the host — that pins the PC cursor in a corner.
                     if *role == DeviceRole::LocalPointer {
-                        match ev.destructure() {
-                            EventSummary::RelativeAxis(_, axis, value) => match axis {
-                                RelativeAxisCode::REL_X => {
-                                    state.trackpad_dx += (value as f32).clamp(-40.0, 40.0);
-                                }
-                                RelativeAxisCode::REL_Y => {
-                                    state.trackpad_dy += (value as f32).clamp(-40.0, 40.0);
-                                }
-                                RelativeAxisCode::REL_WHEEL => {
-                                    state.trackpad_dy +=
-                                        (value as f32 * 2.0).clamp(-20.0, 20.0);
-                                }
-                                _ => {}
-                            },
-                            EventSummary::Key(_, code, value) => {
-                                let pressed = value != 0;
-                                if matches!(code, KeyCode::BTN_LEFT) {
-                                    state.trackpad_click = pressed;
-                                }
-                                if matches!(
-                                    code,
-                                    KeyCode::BTN_TOUCH | KeyCode::BTN_TOOL_FINGER
-                                ) {
-                                    state.trackpad_touch = pressed;
-                                }
-                            }
-                            _ => {}
-                        }
                         continue;
                     }
                     match ev.destructure() {
@@ -486,27 +497,40 @@ pub async fn spawn_input_task(
                         EventSummary::AbsoluteAxis(_, axis, value)
                             if *role == DeviceRole::Trackpad && !pad_saw_rel =>
                         {
-                            // Convert absolute pad position → movement delta.
-                            // Feeding raw ABS as dx/dy pins the host cursor in a corner.
+                            // Deltas only while finger is down. Ignore hover/rest ABS
+                            // (resting near the bottom edge was slamming the host cursor).
+                            let touching = state.trackpad_touch;
                             let entry = pad_last.entry(idx).or_insert((None, None));
                             match axis {
                                 AbsoluteAxisCode::ABS_X
                                 | AbsoluteAxisCode::ABS_MT_POSITION_X => {
-                                    if let Some(prev) = entry.0 {
-                                        let d = (value - prev) as f32;
-                                        state.trackpad_dx += (d * 0.08).clamp(-25.0, 25.0);
+                                    if touching {
+                                        if let Some(prev) = entry.0 {
+                                            let d = (value - prev) as f32;
+                                            if d.abs() < 400.0 {
+                                                state.trackpad_dx +=
+                                                    (d * 0.05).clamp(-12.0, 12.0);
+                                            }
+                                        }
+                                        entry.0 = Some(value);
+                                    } else {
+                                        *entry = (None, entry.1);
                                     }
-                                    entry.0 = Some(value);
-                                    state.trackpad_touch = true;
                                 }
                                 AbsoluteAxisCode::ABS_Y
                                 | AbsoluteAxisCode::ABS_MT_POSITION_Y => {
-                                    if let Some(prev) = entry.1 {
-                                        let d = (value - prev) as f32;
-                                        state.trackpad_dy += (d * 0.08).clamp(-25.0, 25.0);
+                                    if touching {
+                                        if let Some(prev) = entry.1 {
+                                            let d = (value - prev) as f32;
+                                            if d.abs() < 400.0 {
+                                                state.trackpad_dy +=
+                                                    (d * 0.05).clamp(-12.0, 12.0);
+                                            }
+                                        }
+                                        entry.1 = Some(value);
+                                    } else {
+                                        *entry = (entry.0, None);
                                     }
-                                    entry.1 = Some(value);
-                                    state.trackpad_touch = true;
                                 }
                                 _ => {}
                             }
@@ -515,16 +539,16 @@ pub async fn spawn_input_task(
                             if *role == DeviceRole::Trackpad =>
                         {
                             pad_saw_rel = true;
-                            // Relative events are already deltas — do not amplify heavily.
                             match axis {
                                 RelativeAxisCode::REL_X => {
-                                    state.trackpad_dx += (value as f32).clamp(-40.0, 40.0);
+                                    state.trackpad_dx += (value as f32).clamp(-12.0, 12.0);
                                 }
                                 RelativeAxisCode::REL_Y => {
-                                    state.trackpad_dy += (value as f32).clamp(-40.0, 40.0);
+                                    state.trackpad_dy += (value as f32).clamp(-12.0, 12.0);
                                 }
                                 RelativeAxisCode::REL_WHEEL => {
-                                    state.trackpad_dy += (value as f32 * 2.0).clamp(-20.0, 20.0);
+                                    state.trackpad_dy +=
+                                        (value as f32 * 2.0).clamp(-8.0, 8.0);
                                 }
                                 _ => {}
                             }
@@ -537,8 +561,8 @@ pub async fn spawn_input_task(
             }
 
             // Cap per-frame mouse travel so a bad sample cannot slam the cursor.
-            state.trackpad_dx = state.trackpad_dx.clamp(-60.0, 60.0);
-            state.trackpad_dy = state.trackpad_dy.clamp(-60.0, 60.0);
+            state.trackpad_dx = state.trackpad_dx.clamp(-20.0, 20.0);
+            state.trackpad_dy = state.trackpad_dy.clamp(-20.0, 20.0);
 
             tick += 1;
             if got_event || tick % 2 == 0 {

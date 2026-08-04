@@ -57,13 +57,23 @@ fn idle_mouse_keyboard() -> Vec<HidPacket> {
         .collect()
 }
 
-/// Keyboard & Mouse: right trackpad → mouse; buttons/D-pad/left-stick → keys.
+/// Keyboard & Mouse: trackpad and/or right stick → mouse; face/D-pad/left-stick → keys.
 fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     let mut packets = Vec::new();
 
-    // trackpad_* are already pixel-ish deltas; keep near 1:1 (old ×28 slammed the cursor).
-    let dx = state.trackpad_dx.round().clamp(-127.0, 127.0) as i8;
-    let dy = state.trackpad_dy.round().clamp(-127.0, 127.0) as i8;
+    // Trackpad deltas only (never Steam stick-mouse). Right stick is the intentional
+    // analog pointer — deadzoned so resting sticks never drift the host cursor.
+    let mut mx = state.trackpad_dx;
+    let mut my = state.trackpad_dy;
+    const STICK_DZ: f32 = 0.22;
+    if state.rx.abs() > STICK_DZ {
+        mx += (state.rx.signum() * (state.rx.abs() - STICK_DZ)) * 14.0;
+    }
+    if state.ry.abs() > STICK_DZ {
+        my += (state.ry.signum() * (state.ry.abs() - STICK_DZ)) * 14.0;
+    }
+    let dx = mx.round().clamp(-24.0, 24.0) as i8;
+    let dy = my.round().clamp(-24.0, 24.0) as i8;
     let mut buttons = MouseButtons::empty();
     if state.rt > 0.4 || state.trackpad_click {
         buttons |= MouseButtons::LEFT;

@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use bluer::adv::{Advertisement, Type as AdvType};
+use bluer::agent::Agent;
 use bluer::gatt::local::{
     Application, Characteristic, CharacteristicNotify, CharacteristicNotifyMethod,
     CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod, Descriptor,
@@ -182,7 +183,47 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
         info!("adapter alias set to '{device_name}' (was '{previous_alias}')");
     }
 
-    // Best-effort only — Desktop Mode already has a system pairing agent.
+    // Become the BlueZ agent and auto-accept pairing/service auth so SteamOS/KDE
+    // does not pop "Authorize" for DeckLink BT (same advertised name).
+    let agent = Agent {
+        request_default: true,
+        request_authorization: Some(Box::new(|req| {
+            Box::pin(async move {
+                info!("auto-accept pairing authorization from {}", req.device);
+                Ok(())
+            })
+        })),
+        authorize_service: Some(Box::new(|req| {
+            Box::pin(async move {
+                info!(
+                    "auto-accept service {} from {}",
+                    req.service, req.device
+                );
+                Ok(())
+            })
+        })),
+        request_confirmation: Some(Box::new(|req| {
+            Box::pin(async move {
+                info!(
+                    "auto-confirm passkey {} for {}",
+                    req.passkey, req.device
+                );
+                Ok(())
+            })
+        })),
+        ..Default::default()
+    };
+    let agent_handle = match session.register_agent(agent).await {
+        Ok(h) => {
+            info!("registered BlueZ pairing agent (auto-accept)");
+            Some(h)
+        }
+        Err(e) => {
+            warn!("register_agent: {e} — system Bluetooth UI may ask to authorize");
+            None
+        }
+    };
+
     if let Err(e) = adapter.set_discoverable(true).await {
         warn!("set_discoverable: {e}");
     }
@@ -445,6 +486,10 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                 AdapterEvent::DeviceAdded(addr) => {
                     if let Ok(dev) = adapter2.device(addr) {
                         if matches!(dev.is_connected().await, Ok(true)) {
+                            // Trust so reconnects skip the authorize dialog.
+                            if let Err(e) = dev.set_trusted(true).await {
+                                warn!("set_trusted({addr}): {e}");
+                            }
                             let name = dev
                                 .name()
                                 .await
@@ -527,6 +572,8 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
 
     let adapter_restore = adapter.clone();
     tokio::spawn(async move {
+        // Keep agent registered until stop (dropping unregisters it).
+        let _agent_handle = agent_handle;
         loop {
             if stop_rx.changed().await.is_err() {
                 break;
