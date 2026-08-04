@@ -91,7 +91,14 @@ component MouseBtn inherits Rectangle {
 
     TouchArea {
         enabled: root.enabled;
-        pressed-changed => { root.pressed-changed(root.mask, self.pressed); }
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                root.pressed-changed(root.mask, true);
+            }
+            if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
+                root.pressed-changed(root.mask, false);
+            }
+        }
     }
 }
 
@@ -297,22 +304,25 @@ export component MainWindow inherits Window {
                             if self.pressed {
                                 if self.tracking {
                                     root.mouse-delta(
-                                        (self.mouse-x - self.last-x) * root.pad-sensitivity,
-                                        (self.mouse-y - self.last-y) * root.pad-sensitivity
+                                        (self.mouse-x / 1px - self.last-x) * root.pad-sensitivity,
+                                        (self.mouse-y / 1px - self.last-y) * root.pad-sensitivity
                                     );
                                 }
-                                self.last-x = self.mouse-x;
-                                self.last-y = self.mouse-y;
+                                self.last-x = self.mouse-x / 1px;
+                                self.last-y = self.mouse-y / 1px;
                                 self.tracking = true;
+                            } else {
+                                self.tracking = false;
                             }
                         }
-                        pressed-changed => {
-                            if !self.pressed {
-                                self.tracking = false;
-                            } else {
-                                self.last-x = self.mouse-x;
-                                self.last-y = self.mouse-y;
+                        pointer-event(event) => {
+                            if event.kind == PointerEventKind.down {
+                                self.last-x = self.mouse-x / 1px;
+                                self.last-y = self.mouse-y / 1px;
                                 self.tracking = true;
+                            }
+                            if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
+                                self.tracking = false;
                             }
                         }
                     }

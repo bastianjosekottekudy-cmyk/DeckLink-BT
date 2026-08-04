@@ -135,6 +135,7 @@ fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use decklink_hid::GAMEPAD_REPORT_ID;
 
     #[test]
     fn gamepad_emits_one_packet() {
