@@ -207,7 +207,10 @@ async fn run_headless(
                         pump_reports(&shared, &state).await;
                         drain_bt_events(&shared).await;
                     }
-                    Some(InputEvent::Error(e)) => warn!("input: {e}"),
+                    Some(InputEvent::Error(e)) => {
+                        warn!("input: {e}");
+                        shared.lock().unwrap().status = e;
+                    }
                     None => break,
                 }
             }
@@ -223,7 +226,7 @@ async fn pump_reports(shared: &Arc<Mutex<Shared>>, state: &decklink_hid::Control
     if maybe_toggle_profile_chord(shared, state).await {
         // Chord consumed this frame — still map with the new profile below.
     }
-    let (mut packets, report_tx) = {
+    let (packets, report_tx) = {
         let g = shared.lock().unwrap();
         let profile = g.store.config.active_profile;
         let mapped = map_state(profile, state);
@@ -231,23 +234,25 @@ async fn pump_reports(shared: &Arc<Mutex<Shared>>, state: &decklink_hid::Control
             h.set_battery(mapped.battery_pct);
         }
         let tx = g.hogp.as_ref().map(|h| h.report_tx.clone());
-        (mapped.packets, tx)
+        let mut packets = mapped.packets;
+        // Keyboard & Mouse: also keep gamepad idle so host sticks stay centered.
+        // Xbox mode: do NOT stream mouse/keyboard idles every tick — that can keep a
+        // host mouse device alive; idles are flushed once on profile switch.
+        if profile == Profile::Desktop {
+            let have: std::collections::HashSet<u8> =
+                packets.iter().map(|p| p.report_id).collect();
+            for idle in idle_release_packets() {
+                if idle.report_id == decklink_hid::GAMEPAD_REPORT_ID && !have.contains(&idle.report_id)
+                {
+                    packets.push(idle);
+                }
+            }
+        }
+        (packets, tx)
     };
-    // Always refresh every HID collection so hosts that only subscribed to
-    // gamepad (or only KM) still receive releases / idle for the other IDs.
-    ensure_all_report_ids(&mut packets);
     if let Some(tx) = report_tx {
         for pkt in packets {
             let _ = tx.send(pkt).await;
-        }
-    }
-}
-
-fn ensure_all_report_ids(packets: &mut Vec<HidPacket>) {
-    let have: std::collections::HashSet<u8> = packets.iter().map(|p| p.report_id).collect();
-    for idle in idle_release_packets() {
-        if !have.contains(&idle.report_id) {
-            packets.push(idle);
         }
     }
 }
@@ -482,7 +487,11 @@ fn run_ui(shared: Arc<Mutex<Shared>>, mut input_rx: mpsc::Receiver<InputEvent>) 
                                 drain_bt_events(&shared_bg).await;
                                 push_ui(&shared_bg, &ui_weak, Some(state.battery_pct));
                             }
-                            Some(InputEvent::Error(e)) => warn!("input: {e}"),
+                            Some(InputEvent::Error(e)) => {
+                                warn!("input: {e}");
+                                shared_bg.lock().unwrap().status = e;
+                                push_ui(&shared_bg, &ui_weak, None);
+                            }
                             None => break,
                         }
                     }

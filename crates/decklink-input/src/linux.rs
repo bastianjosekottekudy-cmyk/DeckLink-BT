@@ -1,6 +1,7 @@
 //! Linux evdev capture for Steam Deck controls + trackpads.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use evdev::{AbsoluteAxisCode, Device, EventSummary, KeyCode, RelativeAxisCode};
@@ -17,7 +18,7 @@ enum DeviceRole {
     Trackpad,
 }
 
-fn list_devices() -> Vec<(std::path::PathBuf, String)> {
+fn list_devices() -> Vec<(PathBuf, String)> {
     evdev::enumerate()
         .map(|(path, device)| {
             let name = device.name().unwrap_or("").to_string();
@@ -63,8 +64,6 @@ fn score_trackpad(name: &str) -> i32 {
     if lower.contains("touchpad") || lower.contains("trackpad") {
         return 80;
     }
-    // Deck often exposes pads under Valve / Steam names with relative axes only —
-    // we probe after open; give mild score to Steam Deck non-pad siblings.
     if lower.contains("steam") && (lower.contains("pad") || lower.contains("mouse")) {
         return 50;
     }
@@ -151,6 +150,25 @@ fn norm_trigger(value: i32, min: i32, max: i32) -> f32 {
     ((value - min) as f32 / (max - min) as f32).clamp(0.0, 1.0)
 }
 
+/// Open + exclusive grab so Plasma / desktop mouse cannot still see sticks/pads.
+fn open_and_grab(
+    path: &PathBuf,
+    name: &str,
+    role: DeviceRole,
+) -> Result<Device, String> {
+    let mut d = Device::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    // Grab first so the desktop compositor stops receiving stick/trackpad events.
+    d.grab()
+        .map_err(|e| format!("grab {} ({name}) failed: {e}", path.display()))?;
+    let _ = d.set_nonblocking(true);
+    let role_name = match role {
+        DeviceRole::Gamepad => "gamepad",
+        DeviceRole::Trackpad => "trackpad",
+    };
+    info!("grabbed {role_name} {} ({name})", path.display());
+    Ok(d)
+}
+
 pub async fn spawn_input_task(tx: mpsc::Sender<InputEvent>) -> Result<(), InputError> {
     let devices = list_devices();
     for (path, name) in &devices {
@@ -172,45 +190,61 @@ pub async fn spawn_input_task(tx: mpsc::Sender<InputEvent>) -> Result<(), InputE
     pads.sort_by(|a, b| b.0.cmp(&a.0));
 
     let mut tracks: Vec<_> = devices
-        .into_iter()
+        .iter()
+        .cloned()
         .map(|(path, name)| (score_trackpad(&name), path, name))
         .filter(|(s, _, _)| *s > 0)
         .collect();
     tracks.sort_by(|a, b| b.0.cmp(&a.0));
 
     let mut opened: Vec<(DeviceRole, String, Device)> = Vec::new();
+    let mut used_paths: HashSet<PathBuf> = HashSet::new();
+    let mut grab_warnings: Vec<String> = Vec::new();
 
-    // One primary gamepad only — IMU/extra pads were overwriting stick axes.
-    if let Some((_score, path, name)) = pads.into_iter().next() {
-        match Device::open(&path) {
-            Ok(mut d) => {
-                let _ = d.set_nonblocking(true);
-                if let Err(e) = d.grab() {
-                    warn!("grab {} failed (continuing): {e}", path.display());
-                } else {
-                    info!("grabbed gamepad {}", path.display());
-                }
-                info!("opening gamepad {} ({})", path.display(), name);
-                opened.push((DeviceRole::Gamepad, name, d));
+    // Grab every plausible gamepad node (Deck often exposes more than one).
+    // Without exclusive grab, Desktop Mode keeps using sticks as a mouse.
+    for (_score, path, name) in pads.into_iter().take(3) {
+        if !used_paths.insert(path.clone()) {
+            continue;
+        }
+        match open_and_grab(&path, &name, DeviceRole::Gamepad) {
+            Ok(d) => opened.push((DeviceRole::Gamepad, name, d)),
+            Err(e) => {
+                warn!("{e}");
+                grab_warnings.push(e);
             }
-            Err(e) => warn!("failed to open gamepad {}: {}", path.display(), e),
         }
     }
 
     for (_score, path, name) in tracks.into_iter().take(2) {
-        match Device::open(&path) {
-            Ok(d) => {
-                let _ = d.set_nonblocking(true);
-                info!("opening trackpad {} ({})", path.display(), name);
-                opened.push((DeviceRole::Trackpad, name, d));
+        if !used_paths.insert(path.clone()) {
+            continue;
+        }
+        match open_and_grab(&path, &name, DeviceRole::Trackpad) {
+            Ok(d) => opened.push((DeviceRole::Trackpad, name, d)),
+            Err(e) => {
+                warn!("{e}");
+                grab_warnings.push(e);
             }
-            Err(e) => warn!("failed to open trackpad {}: {}", path.display(), e),
         }
     }
 
     if opened.is_empty() {
         return Err(InputError::NoDevice);
     }
+
+    if !grab_warnings.is_empty() {
+        let msg = format!(
+            "input grab incomplete — Desktop mouse may still move with sticks. {}",
+            grab_warnings.join("; ")
+        );
+        let _ = tx.send(InputEvent::Error(msg)).await;
+    }
+
+    // Only the first successfully opened gamepad drives stick/button state.
+    let primary_gamepad_idx = opened
+        .iter()
+        .position(|(r, _, _)| *r == DeviceRole::Gamepad);
 
     tokio::spawn(async move {
         let mut state = ControllerState::default();
@@ -246,9 +280,19 @@ pub async fn spawn_input_task(tx: mpsc::Sender<InputEvent>) -> Result<(), InputE
                     got_event = true;
                     match ev.destructure() {
                         EventSummary::Key(_, code, value) => {
+                            // Keys from any grabbed gamepad/trackpad.
+                            if *role == DeviceRole::Gamepad
+                                && primary_gamepad_idx != Some(idx)
+                            {
+                                // Extra gamepad nodes: still swallow via grab, ignore state.
+                                continue;
+                            }
                             apply_key(&mut state, code, value != 0);
                         }
-                        EventSummary::AbsoluteAxis(_, axis, value) if *role == DeviceRole::Gamepad => {
+                        EventSummary::AbsoluteAxis(_, axis, value)
+                            if *role == DeviceRole::Gamepad
+                                && primary_gamepad_idx == Some(idx) =>
+                        {
                             let code = axis.0;
                             let (min, max) = abs_min_max
                                 .get(&(idx, code))
@@ -294,27 +338,34 @@ pub async fn spawn_input_task(tx: mpsc::Sender<InputEvent>) -> Result<(), InputE
                                 _ => {}
                             }
                         }
-                        EventSummary::AbsoluteAxis(_, axis, value) if *role == DeviceRole::Trackpad => {
-                            // Absolute touchpads: treat deltas from center-ish movement poorly;
-                            // prefer REL when available. Map ABS_X/Y lightly as cursor nudge.
+                        EventSummary::AbsoluteAxis(_, axis, value)
+                            if *role == DeviceRole::Trackpad =>
+                        {
+                            // Trackpads only — never treat stick ABS devices as mouse.
                             match axis {
-                                AbsoluteAxisCode::ABS_X => {
+                                AbsoluteAxisCode::ABS_X | AbsoluteAxisCode::ABS_MT_POSITION_X => {
                                     state.trackpad_dx += norm_axis(value, 0, 1000) * 8.0;
                                 }
-                                AbsoluteAxisCode::ABS_Y => {
+                                AbsoluteAxisCode::ABS_Y | AbsoluteAxisCode::ABS_MT_POSITION_Y => {
                                     state.trackpad_dy += norm_axis(value, 0, 1000) * 8.0;
                                 }
                                 _ => {}
                             }
                         }
-                        EventSummary::RelativeAxis(_, axis, value) => match axis {
-                            RelativeAxisCode::REL_X => state.trackpad_dx += value as f32,
-                            RelativeAxisCode::REL_Y => state.trackpad_dy += value as f32,
-                            RelativeAxisCode::REL_WHEEL => {
-                                state.trackpad_dy += value as f32 * 2.0;
+                        EventSummary::RelativeAxis(_, axis, value)
+                            if *role == DeviceRole::Trackpad =>
+                        {
+                            match axis {
+                                RelativeAxisCode::REL_X => state.trackpad_dx += value as f32,
+                                RelativeAxisCode::REL_Y => state.trackpad_dy += value as f32,
+                                RelativeAxisCode::REL_WHEEL => {
+                                    state.trackpad_dy += value as f32 * 2.0;
+                                }
+                                _ => {}
                             }
-                            _ => {}
-                        },
+                        }
+                        // Swallow relative events on gamepad nodes (prevents stick→mouse leaks).
+                        EventSummary::RelativeAxis(_, _, _) if *role == DeviceRole::Gamepad => {}
                         _ => {}
                     }
                 }
