@@ -6,10 +6,8 @@ DeckLink BT turns your Steam Deck into a BLE HID gamepad (HOGP). The host PC, ph
 
 ## Features
 
-- **Gamepad mode** — Xbox-style mapping (sticks, triggers, face buttons, D-pad, grips)
-- **Desktop & Media** — right trackpad mouse, triggers as clicks, media keys
-- **Flight Sim** — precision stick / throttle-oriented mapping
-- **Racing (Gyro)** — yaw gyro steers; triggers throttle/brake
+- **Xbox Controller** — sticks, triggers, face buttons, D-pad, grips
+- **Keyboard & Mouse** — on-screen trackpad + full soft keyboard (TapBoard-style); physical Deck trackpad works too
 - **Battery service** — exposes Deck battery to the host
 - **Paired targets** — remembers hosts you have connected to
 - **Gaming Mode** — register as a Non-Steam game via the install script
@@ -82,18 +80,32 @@ Desktop Mode: use the **DeckLink BT** app menu entry (UI) for pairing/profiles.
 
 ## Publishing releases (maintainers)
 
-There is **no tag-triggered release workflow**. After commits are pushed to `main`, CI builds the Linux tarball artifact. Publish/replace the current version’s GitHub Release with:
+There is **no GitHub Actions CI/release workflow**. Build locally (WSL on Windows) and replace assets on the current version tag:
 
 ```bash
-python scripts/publish_latest_release.py
+python scripts/publish_release.py
 ```
 
 - Reuses `Cargo.toml` version (e.g. `1.0.0` → release `v1.0.0`) and **replaces** assets.
 - Bump version **only** when asked explicitly:
 
 ```bash
-python scripts/publish_latest_release.py --bump patch   # or minor / major
+python scripts/publish_release.py --bump patch   # or minor / major
 ```
+
+Enable auto-publish after commits that touch `crates/` / `packaging/`:
+
+```bash
+python scripts/install_git_hooks.py
+```
+
+Skip once with `DECKLINK_SKIP_PUBLISH=1` or `git commit --no-verify`.
+
+## Releases
+
+- **Publish**: `python scripts/publish_release.py` — builds Linux x86_64 tarball in WSL (or native Linux), uploads to `v{version}`.
+- Do **not** bump version unless the user asks (`--bump`).
+- Do **not** add GitHub Actions for releases.
 
 ## Pairing (host)
 
@@ -105,17 +117,10 @@ python scripts/publish_latest_release.py --bump patch   # or minor / major
 
 | Profile | Behavior |
 |---------|----------|
-| Gamepad (Xbox) | Standard gamepad HID |
-| Desktop & Media | Trackpad mouse + media keys |
-| Flight Sim | Sticks/triggers tuned for flight |
-| Racing (Gyro) | Gyro yaw → steer axis |
+| Xbox Controller | Standard gamepad HID |
+| Keyboard & Mouse | On-screen trackpad + full soft keyboard (TapBoard-style); Deck trackpad also works |
 
 Config lives in `~/.config/decklink-bt/config.json`.
-
-## CI / Releases
-
-- **CI** (`.github/workflows/ci.yml`): on every `main` push, tests + builds `decklink-bt-linux-x86_64.tar.gz` as an Actions artifact.
-- **Publish**: run `python scripts/publish_latest_release.py` after push — replaces assets on the current `v{version}` release. Do **not** bump version unless the user asks (`--bump`).
 
 ## Build from source
 

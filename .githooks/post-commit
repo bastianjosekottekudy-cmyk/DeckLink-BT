@@ -1,0 +1,4 @@
+#!/bin/sh
+# Delegates to Python so the same logic works on Windows (Git Bash) and Unix.
+ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+exec python "$ROOT/.githooks/post-commit.py"

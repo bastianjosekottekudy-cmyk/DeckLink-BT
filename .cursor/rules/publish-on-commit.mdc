@@ -1,21 +1,33 @@
 ---
-description: After commit/push on DeckLink-BT, publish/replace GitHub Release assets without bumping version unless asked
+description: After commits, publish Linux release via local Python/WSL — no GH Actions, no auto version bump
 globs:
 alwaysApply: true
 ---
 
-# DeckLink BT release publishing
+# DeckLink BT release publish (no GitHub Actions)
 
-When the user asks to commit and/or push in this repo:
+Do **not** create or restore `.github/workflows` CI/release workflows. Publishing is local Python only (WSL build on Windows), same pattern as TapBoard.
+
+When the user asks to commit and/or push:
 
 1. Use the commit-and-push skill as usual.
-2. Then run (unless the user says not to publish):
+2. Run (unless a post-commit hook already did it successfully in the same turn):
 
 ```powershell
-python scripts/publish_latest_release.py
+python scripts/publish_release.py
 ```
 
+Skip publish only for commits that do not touch `crates/`, `packaging/`, or release scripts (docs/rules-only).
+
 Rules:
-- Do **not** bump `Cargo.toml` version unless the user explicitly asks (then use `--bump patch|minor|major`).
-- The script waits for CI on the pushed SHA, downloads the Linux tarball artifact, and creates/replaces assets on `v{version}`.
+- Do **not** bump `Cargo.toml` version unless the user explicitly asks (`--bump patch|minor|major`).
+- Keep replacing the tarball on the same GitHub release tag `v{version}` with `--clobber`.
 - If publish fails, report `ERROR=` from the script; do not invent a release.
+
+Repo uses `.githooks/post-commit` → `scripts/publish_release.py` when HEAD includes release paths. Install once per clone:
+
+```powershell
+python scripts/install_git_hooks.py
+```
+
+Skip a single commit publish with `DECKLINK_SKIP_PUBLISH=1` or `git commit --no-verify`.
