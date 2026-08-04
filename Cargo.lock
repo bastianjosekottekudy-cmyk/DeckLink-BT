@@ -1239,6 +1239,7 @@ dependencies = [
  "decklink-profiles",
  "decklink-ui",
  "dirs",
+ "libc",
  "serde",
  "serde_json",
  "slint",
