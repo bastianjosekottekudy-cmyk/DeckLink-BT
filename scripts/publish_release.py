@@ -141,13 +141,13 @@ def build_linux_tarball() -> Path:
         script = ROOT / "scripts" / "wsl_build_release.sh"
         if not script.is_file():
             die(f"missing {script}")
-        # Normalize line endings for bash
-        text = script.read_text(encoding="utf-8").replace("\r\n", "\n")
-        script.write_text(text, encoding="utf-8")
+        # Normalize line endings for bash (force LF; Windows text mode would re-add CRLF).
+        raw = script.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        script.write_bytes(raw)
         wsl_script = windows_to_wsl_path(script)
         print(f"+ wsl bash {wsl_script}", flush=True)
         proc = subprocess.run(
-            ["wsl", "bash", wsl_script],
+            ["wsl", "bash", "-c", f"sed -i 's/\\r$//' '{wsl_script}' && bash '{wsl_script}'"],
             cwd=str(ROOT),
             text=True,
         )
