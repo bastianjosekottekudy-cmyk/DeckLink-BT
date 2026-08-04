@@ -16,3 +16,4 @@ bitflags.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = { version = "0.13", features = ["tokio"] }
 nix = { version = "0.29", features = ["fs", "ioctl"] }
+libc = "0.2"

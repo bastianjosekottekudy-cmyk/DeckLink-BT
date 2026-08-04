@@ -57,23 +57,27 @@ fn idle_mouse_keyboard() -> Vec<HidPacket> {
         .collect()
 }
 
-/// Keyboard & Mouse: trackpad and/or right stick → mouse; face/D-pad/left-stick → keys.
+/// Keyboard & Mouse: right stick (primary) + right-pad deltas; face/D-pad/left-stick → keys.
 fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     let mut packets = Vec::new();
 
-    // Trackpad deltas only (never Steam stick-mouse). Right stick is the intentional
-    // analog pointer — deadzoned so resting sticks never drift the host cursor.
-    let mut mx = state.trackpad_dx;
-    let mut my = state.trackpad_dy;
-    const STICK_DZ: f32 = 0.22;
+    // Large deadzone: resting sticks must never produce host mouse motion.
+    let mut mx = 0.0f32;
+    let mut my = 0.0f32;
+    const STICK_DZ: f32 = 0.35;
     if state.rx.abs() > STICK_DZ {
-        mx += (state.rx.signum() * (state.rx.abs() - STICK_DZ)) * 14.0;
+        mx += (state.rx.signum() * (state.rx.abs() - STICK_DZ)) * 12.0;
     }
     if state.ry.abs() > STICK_DZ {
-        my += (state.ry.signum() * (state.ry.abs() - STICK_DZ)) * 14.0;
+        my += (state.ry.signum() * (state.ry.abs() - STICK_DZ)) * 12.0;
     }
-    let dx = mx.round().clamp(-24.0, 24.0) as i8;
-    let dy = my.round().clamp(-24.0, 24.0) as i8;
+    // Right-pad deltas from hidraw (already touch-gated upstream).
+    if state.trackpad_touch {
+        mx += state.trackpad_dx;
+        my += state.trackpad_dy;
+    }
+    let dx = mx.round().clamp(-20.0, 20.0) as i8;
+    let dy = my.round().clamp(-20.0, 20.0) as i8;
     let mut buttons = MouseButtons::empty();
     if state.rt > 0.4 || state.trackpad_click {
         buttons |= MouseButtons::LEFT;

@@ -135,8 +135,10 @@ async fn main() -> Result<()> {
         advertising: false,
         connected: false,
         peer_name: "—".into(),
-        status: "Ready — Xbox + Keyboard&Mouse share one Bluetooth link; switch anytime"
-            .into(),
+        status: format!(
+            "Ready v{} (hidraw) — advertise, then pair DeckLink BT; Desktop mouse = right stick",
+            env!("CARGO_PKG_VERSION")
+        ),
         sticky_mods: 0,
         soft_mouse_buttons: 0,
         type_sent_len: 0,

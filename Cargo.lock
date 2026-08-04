@@ -1277,6 +1277,7 @@ dependencies = [
  "bitflags 2.13.1",
  "decklink-hid",
  "evdev",
+ "libc",
  "nix 0.29.0",
  "serde",
  "thiserror 2.0.19",

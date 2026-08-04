@@ -150,7 +150,25 @@ sudo udevadm trigger || true
 if command -v usermod >/dev/null 2>&1; then
   sudo usermod -aG input "$USER" || true
 fi
+
+# Allow DeckLink to toggle kernel lizard mode without a password prompt.
+SUDOERS_DST="/etc/sudoers.d/decklink-bt-lizard"
+sudo tee "$SUDOERS_DST" >/dev/null <<EOF
+# DeckLink BT — non-interactive lizard_mode toggle
+${USER} ALL=(root) NOPASSWD: /usr/bin/tee /sys/module/hid_steam/parameters/lizard_mode
+EOF
+sudo chmod 440 "$SUDOERS_DST" || true
+if [[ -e /sys/module/hid_steam/parameters/lizard_mode ]]; then
+  echo N | sudo tee /sys/module/hid_steam/parameters/lizard_mode >/dev/null || true
+  echo "==> hid_steam lizard_mode set to N (Desktop stick-mouse off at kernel)"
+fi
 steamos_rw_end
+
+if [[ -x "$LAUNCH" ]]; then
+  echo "==> Installed binary: $LAUNCH"
+  ls -la "$LAUNCH" || true
+  sha256sum "$LAUNCH" 2>/dev/null || shasum -a 256 "$LAUNCH" 2>/dev/null || true
+fi
 
 # --- Desktop entry (app menu + Desktop shortcut) -----------------------------
 write_desktop_file() {

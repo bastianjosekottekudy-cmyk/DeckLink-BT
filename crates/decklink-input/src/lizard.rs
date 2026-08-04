@@ -133,22 +133,32 @@ fn apply_watchdog_feed(file: &File) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Disable lizard mode on a specific hidraw node.
+pub fn open_and_disable_on(path: &Path) -> Option<LizardGuard> {
+    let file = match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("hidraw open {}: {e}", path.display());
+            return None;
+        }
+    };
+    match apply_disable(&file) {
+        Ok(()) => {
+            info!("lizard mode disabled via {}", path.display());
+            Some(LizardGuard { file })
+        }
+        Err(e) => {
+            warn!("lizard disable on {}: {e}", path.display());
+            None
+        }
+    }
+}
+
 /// Open a Deck controller hidraw and disable lizard mode.
 pub fn open_and_disable() -> Option<LizardGuard> {
     for path in list_valve_hidraw() {
-        let file = match OpenOptions::new().read(true).write(true).open(&path) {
-            Ok(f) => f,
-            Err(e) => {
-                warn!("hidraw open {}: {e}", path.display());
-                continue;
-            }
-        };
-        match apply_disable(&file) {
-            Ok(()) => {
-                info!("lizard mode disabled via {}", path.display());
-                return Some(LizardGuard { file });
-            }
-            Err(e) => warn!("lizard disable on {}: {e}", path.display()),
+        if let Some(g) = open_and_disable_on(&path) {
+            return Some(g);
         }
     }
     None

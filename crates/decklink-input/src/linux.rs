@@ -1,4 +1,4 @@
-//! Linux evdev capture for Steam Deck controls + trackpads.
+//! Linux input: prefer Valve hidraw Deck reports; grab local pointer devices while BLE is active.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -10,13 +10,14 @@ use tracing::{info, warn};
 
 use decklink_hid::{ControllerState, GamepadButtons};
 
+use crate::hidraw_deck::{self, HidrawDeck};
 use crate::{read_battery_percent, InputCommand, InputError, InputEvent};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DeviceRole {
     Gamepad,
     Trackpad,
-    /// Lizard / Steam Desktop mouse+keyboard — grab only (never feed host HID).
+    /// Swallow only — Steam/lizard/uinput pointer must not reach Desktop or host HID.
     LocalPointer,
 }
 
@@ -63,7 +64,6 @@ fn score_gamepad(name: &str) -> i32 {
 
 fn score_trackpad(name: &str) -> i32 {
     let lower = name.to_ascii_lowercase();
-    // Real Deck touchpads — not the firmware "… Mouse" lizard interface.
     if lower.contains("touchpad") || lower.contains("trackpad") {
         return 80;
     }
@@ -73,13 +73,20 @@ fn score_trackpad(name: &str) -> i32 {
     -100
 }
 
-/// Devices that move the *local* Desktop cursor (lizard mode / Steam Desktop Config).
 fn score_local_pointer(name: &str) -> i32 {
     let lower = name.to_ascii_lowercase();
-    if lower.contains("decklink") {
+    if lower.contains("decklink") || lower.contains("power") || lower.contains("lid") {
         return -100;
     }
-    if (lower.contains("mouse") || lower.contains("keyboard") || lower.contains("consumer"))
+    if lower.contains("mouse")
+        || lower.contains("touchpad")
+        || lower.contains("trackpad")
+        || lower.contains("extest")
+        || (lower.contains("uinput") && (lower.contains("mouse") || lower.contains("pointer")))
+    {
+        return 100;
+    }
+    if (lower.contains("keyboard") || lower.contains("consumer"))
         && (lower.contains("steam")
             || lower.contains("valve")
             || lower.contains("deck")
@@ -87,13 +94,17 @@ fn score_local_pointer(name: &str) -> i32 {
     {
         return 90;
     }
-    if lower.contains("extest") || (lower.contains("uinput") && lower.contains("mouse")) {
-        return 80;
-    }
     if lower.contains("steam") && lower.contains("mouse") {
-        return 85;
+        return 95;
     }
     -100
+}
+
+/// Anything Steam/Deck uses to drive the *local* cursor — grab while advertising.
+fn should_silence(name: &str) -> bool {
+    score_local_pointer(name) > 0
+        || score_gamepad(name) > 0
+        || score_trackpad(name) > 0
 }
 
 fn apply_key(state: &mut ControllerState, code: KeyCode, pressed: bool) {
@@ -180,35 +191,6 @@ fn norm_trigger(value: i32, min: i32, max: i32) -> f32 {
     ((value - min) as f32 / (max - min) as f32).clamp(0.0, 1.0)
 }
 
-fn open_device(path: &PathBuf, name: &str, role: DeviceRole) -> Result<Device, String> {
-    let d = Device::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    let _ = d.set_nonblocking(true);
-    info!("opened {} {} ({name})", role_name(role), path.display());
-    Ok(d)
-}
-
-/// Valve (0x28DE) interfaces that look like mouse/keyboard — grab to stop Desktop cursor.
-fn looks_like_valve_pointer(dev: &Device, name: &str) -> bool {
-    if score_local_pointer(name) > 0 {
-        return true;
-    }
-    let id = dev.input_id();
-    if id.vendor() != 0x28DE {
-        return false;
-    }
-    // Virtual Steam gamepad is 0x11FF — leave that as gamepad, not pointer.
-    if id.product() == 0x11FF {
-        return false;
-    }
-    let lower = name.to_ascii_lowercase();
-    lower.contains("mouse")
-        || lower.contains("keyboard")
-        || lower.contains("consumer")
-        || dev
-            .supported_relative_axes()
-            .is_some_and(|a| a.contains(RelativeAxisCode::REL_X))
-}
-
 fn role_name(role: DeviceRole) -> &'static str {
     match role {
         DeviceRole::Gamepad => "gamepad",
@@ -217,32 +199,135 @@ fn role_name(role: DeviceRole) -> &'static str {
     }
 }
 
-fn set_devices_exclusive(
-    opened: &mut [(DeviceRole, String, Device)],
-    exclusive: bool,
-    quiet: bool,
-) {
-    for (role, name, dev) in opened.iter_mut() {
-        let role_name = role_name(*role);
+fn open_silence_devices() -> Vec<(String, Device)> {
+    let mut out = Vec::new();
+    let mut used = HashSet::new();
+    for (path, name) in list_devices() {
+        if !should_silence(&name) || !used.insert(path.clone()) {
+            continue;
+        }
+        match Device::open(&path) {
+            Ok(d) => {
+                let _ = d.set_nonblocking(true);
+                info!("silence-open {} ({})", path.display(), name);
+                out.push((name, d));
+            }
+            Err(e) => warn!("silence-open {}: {e}", path.display()),
+        }
+    }
+    out
+}
+
+fn set_silence_exclusive(devs: &mut [(String, Device)], exclusive: bool, quiet: bool) {
+    for (name, dev) in devs.iter_mut() {
         if exclusive {
             match dev.grab() {
                 Ok(()) => {
                     if !quiet {
-                        info!("exclusive grab on {role_name} ({name})");
+                        info!("exclusive grab (silence) ({name})");
                     }
                 }
-                Err(e) => warn!("grab {role_name} ({name}) failed: {e}"),
+                Err(e) => warn!("grab silence ({name}) failed: {e}"),
             }
         } else {
             match dev.ungrab() {
-                Ok(()) => info!("released grab on {role_name} ({name}) — desktop controls restored"),
-                Err(e) => warn!("ungrab {role_name} ({name}) failed: {e}"),
+                Ok(()) => info!("released silence grab ({name})"),
+                Err(e) => warn!("ungrab silence ({name}) failed: {e}"),
             }
         }
     }
 }
 
+/// Drain silence devices so the kernel queue does not back up (events discarded).
+fn drain_silence(devs: &mut [(String, Device)]) {
+    for (_name, dev) in devs.iter_mut() {
+        match dev.fetch_events() {
+            Ok(evs) => {
+                for _ in evs {}
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => {}
+        }
+    }
+}
+
 pub async fn spawn_input_task(
+    tx: mpsc::Sender<InputEvent>,
+    mut cmd_rx: mpsc::Receiver<InputCommand>,
+) -> Result<(), InputError> {
+    // Prefer hidraw: owns Deck reports and fights lizard/Steam Desktop mouse at the source.
+    if let Some(deck) = hidraw_deck::open() {
+        info!("input backend: hidraw ({})", deck.path().display());
+        tokio::spawn(async move {
+            run_hidraw_loop(deck, tx, cmd_rx).await;
+        });
+        return Ok(());
+    }
+
+    warn!("hidraw Deck unavailable — falling back to evdev (Steam may still move local mouse)");
+    spawn_evdev_fallback(tx, cmd_rx).await
+}
+
+async fn run_hidraw_loop(
+    mut deck: HidrawDeck,
+    tx: mpsc::Sender<InputEvent>,
+    mut cmd_rx: mpsc::Receiver<InputCommand>,
+) {
+    let mut silence = open_silence_devices();
+    let mut exclusive = false;
+    let mut state = ControllerState::default();
+    let mut tick: u64 = 0;
+
+    loop {
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            let InputCommand::SetExclusive(want) = cmd;
+            if want != exclusive {
+                exclusive = want;
+                // Rescan — Steam may create new uinput mice after we start.
+                if exclusive {
+                    set_silence_exclusive(&mut silence, false, true);
+                    silence = open_silence_devices();
+                }
+                set_silence_exclusive(&mut silence, exclusive, false);
+                if exclusive {
+                    deck.feed_lizard();
+                    hidraw_deck::set_kernel_lizard_mode(false);
+                } else {
+                    hidraw_deck::set_kernel_lizard_mode(true);
+                }
+            }
+        }
+
+        state.clear_relative();
+        // clear_relative only clears dx/dy; re-poll fills the rest.
+        let _got = deck.poll(&mut state);
+        state.battery_pct = read_battery_percent();
+
+        if exclusive {
+            drain_silence(&mut silence);
+            if tick > 0 && tick % 80 == 0 {
+                // Steam respawns pointer devices — re-grab periodically.
+                set_silence_exclusive(&mut silence, false, true);
+                silence = open_silence_devices();
+                set_silence_exclusive(&mut silence, true, true);
+                deck.feed_lizard();
+            } else if tick % 40 == 0 {
+                deck.feed_lizard();
+            }
+        }
+
+        tick += 1;
+        if tx.send(InputEvent::State(state.clone())).await.is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(4)).await;
+    }
+
+    set_silence_exclusive(&mut silence, false, false);
+    hidraw_deck::set_kernel_lizard_mode(true);
+}
+
+async fn spawn_evdev_fallback(
     tx: mpsc::Sender<InputEvent>,
     mut cmd_rx: mpsc::Receiver<InputCommand>,
 ) -> Result<(), InputError> {
@@ -258,6 +343,9 @@ pub async fn spawn_input_task(
         );
     }
 
+    let mut opened: Vec<(DeviceRole, String, Device)> = Vec::new();
+    let mut used_paths: HashSet<PathBuf> = HashSet::new();
+
     let mut pads: Vec<_> = devices
         .iter()
         .cloned()
@@ -265,76 +353,39 @@ pub async fn spawn_input_task(
         .filter(|(s, _, _)| *s > 0)
         .collect();
     pads.sort_by(|a, b| b.0.cmp(&a.0));
-
-    let mut tracks: Vec<_> = devices
-        .iter()
-        .cloned()
-        .map(|(path, name)| (score_trackpad(&name), path, name))
-        .filter(|(s, _, _)| *s > 0)
-        .collect();
-    tracks.sort_by(|a, b| b.0.cmp(&a.0));
-
-    let mut locals: Vec<_> = devices
-        .iter()
-        .cloned()
-        .map(|(path, name)| (score_local_pointer(&name), path, name))
-        .filter(|(s, _, _)| *s > 0)
-        .collect();
-    locals.sort_by(|a, b| b.0.cmp(&a.0));
-
-    let mut opened: Vec<(DeviceRole, String, Device)> = Vec::new();
-    let mut used_paths: HashSet<PathBuf> = HashSet::new();
-
-    // Open without grab — exclusive grab is enabled only while BLE is active
-    // so sticks return to Desktop mouse when disconnected.
     for (_score, path, name) in pads.into_iter().take(5) {
         if !used_paths.insert(path.clone()) {
             continue;
         }
-        match open_device(&path, &name, DeviceRole::Gamepad) {
-            Ok(d) => opened.push((DeviceRole::Gamepad, name, d)),
-            Err(e) => warn!("{e}"),
+        match Device::open(&path) {
+            Ok(d) => {
+                let _ = d.set_nonblocking(true);
+                opened.push((DeviceRole::Gamepad, name, d));
+            }
+            Err(e) => warn!("open gamepad: {e}"),
         }
     }
 
-    for (_score, path, name) in tracks.into_iter().take(2) {
-        if !used_paths.insert(path.clone()) {
-            continue;
-        }
-        match open_device(&path, &name, DeviceRole::Trackpad) {
-            Ok(d) => opened.push((DeviceRole::Trackpad, name, d)),
-            Err(e) => warn!("{e}"),
-        }
-    }
-
-    for (_score, path, name) in locals.into_iter().take(6) {
-        if !used_paths.insert(path.clone()) {
-            continue;
-        }
-        match open_device(&path, &name, DeviceRole::LocalPointer) {
-            Ok(d) => opened.push((DeviceRole::LocalPointer, name, d)),
-            Err(e) => warn!("{e}"),
-        }
-    }
-
-    // Second pass: any remaining Valve mouse/keyboard nodes missed by name scoring.
     for (path, name) in &devices {
-        if used_paths.contains(path) {
+        if used_paths.contains(path) || !should_silence(name) {
             continue;
         }
-        let Ok(probe) = Device::open(path) else {
-            continue;
-        };
-        if !looks_like_valve_pointer(&probe, name) {
+        if score_gamepad(name) > 0 {
             continue;
         }
-        drop(probe);
-        if !used_paths.insert(path.clone()) {
-            continue;
-        }
-        match open_device(path, name, DeviceRole::LocalPointer) {
-            Ok(d) => opened.push((DeviceRole::LocalPointer, name.clone(), d)),
-            Err(e) => warn!("{e}"),
+        used_paths.insert(path.clone());
+        match Device::open(path) {
+            Ok(d) => {
+                let _ = d.set_nonblocking(true);
+                let role = if score_trackpad(name) > 0 {
+                    DeviceRole::Trackpad
+                } else {
+                    DeviceRole::LocalPointer
+                };
+                info!("opened {} {} ({name})", role_name(role), path.display());
+                opened.push((role, name.clone(), d));
+            }
+            Err(e) => warn!("open silence: {e}"),
         }
     }
 
@@ -342,7 +393,6 @@ pub async fn spawn_input_task(
         return Err(InputError::NoDevice);
     }
 
-    // Only the first successfully opened gamepad drives stick/button state.
     let primary_gamepad_idx = opened
         .iter()
         .position(|(r, _, _)| *r == DeviceRole::Gamepad);
@@ -351,8 +401,6 @@ pub async fn spawn_input_task(
         let mut state = ControllerState::default();
         let mut abs_min_max: HashMap<(usize, u16), (i32, i32)> = HashMap::new();
         let mut exclusive = false;
-        let mut lizard: Option<crate::lizard::LizardGuard> = None;
-        // Absolute trackpad → relative mouse via deltas (never feed raw ABS as motion).
         let mut pad_last: HashMap<usize, (Option<i32>, Option<i32>)> = HashMap::new();
 
         for (idx, (_role, _name, dev)) in opened.iter().enumerate() {
@@ -365,46 +413,31 @@ pub async fn spawn_input_task(
             }
         }
 
-        let mut tick: u64 = 0;
         loop {
             while let Ok(cmd) = cmd_rx.try_recv() {
                 let InputCommand::SetExclusive(want) = cmd;
                 if want != exclusive {
                     exclusive = want;
-                    set_devices_exclusive(&mut opened, exclusive, false);
-                    if exclusive {
-                        lizard = crate::lizard::open_and_disable();
-                        if lizard.is_none() {
-                            warn!(
-                                "could not disable lizard mode via hidraw — hold MENU (⋯) once if Deck mouse still moves"
-                            );
+                    for (role, name, dev) in opened.iter_mut() {
+                        if exclusive {
+                            if let Err(e) = dev.grab() {
+                                warn!("grab {} ({name}): {e}", role_name(*role));
+                            } else {
+                                info!("exclusive grab on {} ({name})", role_name(*role));
+                            }
+                        } else if let Err(e) = dev.ungrab() {
+                            warn!("ungrab {} ({name}): {e}", role_name(*role));
                         }
-                    } else {
-                        lizard = None;
-                        info!("lizard guard released — firmware Desktop mouse can return");
                     }
-                }
-            }
-
-            // Re-assert grab + lizard heartbeat; Steam/hid-steam may steal focus back.
-            if exclusive {
-                if tick > 0 && tick % 100 == 0 {
-                    set_devices_exclusive(&mut opened, true, true);
-                    if let Some(g) = &lizard {
-                        g.feed_watchdog();
-                    } else {
-                        lizard = crate::lizard::open_and_disable();
-                    }
-                } else if tick % 100 == 50 {
-                    if let Some(g) = &lizard {
-                        g.feed_watchdog();
+                    hidraw_deck::set_kernel_lizard_mode(!exclusive);
+                    if exclusive {
+                        let _ = crate::lizard::open_and_disable();
                     }
                 }
             }
 
             state.clear_relative();
             state.battery_pct = read_battery_percent();
-            let mut got_event = false;
             let mut pad_saw_rel = false;
 
             for (idx, (role, _name, dev)) in opened.iter_mut().enumerate() {
@@ -416,44 +449,30 @@ pub async fn spawn_input_task(
                         continue;
                     }
                 };
-
                 for ev in events {
-                    got_event = true;
-                    // Swallow lizard/Steam Desktop pointer (often stick→mouse).
-                    // Never forward it to the host — that pins the PC cursor in a corner.
                     if *role == DeviceRole::LocalPointer {
                         continue;
                     }
                     match ev.destructure() {
                         EventSummary::Key(_, code, value) => {
-                            // Keys from any grabbed gamepad/trackpad.
-                            if *role == DeviceRole::Gamepad
-                                && primary_gamepad_idx != Some(idx)
-                            {
-                                // Extra gamepad nodes: still swallow via grab, ignore state.
+                            if *role == DeviceRole::Gamepad && primary_gamepad_idx != Some(idx) {
                                 continue;
                             }
                             let pressed = value != 0;
                             apply_key(&mut state, code, pressed);
                             if *role == DeviceRole::Trackpad
-                                && matches!(
-                                    code,
-                                    KeyCode::BTN_TOUCH | KeyCode::BTN_TOOL_FINGER
-                                )
+                                && matches!(code, KeyCode::BTN_TOUCH | KeyCode::BTN_TOOL_FINGER)
                                 && !pressed
                             {
                                 pad_last.insert(idx, (None, None));
                             }
                         }
                         EventSummary::AbsoluteAxis(_, axis, value)
-                            if *role == DeviceRole::Gamepad
-                                && primary_gamepad_idx == Some(idx) =>
+                            if *role == DeviceRole::Gamepad && primary_gamepad_idx == Some(idx) =>
                         {
                             let code = axis.0;
-                            let (min, max) = abs_min_max
-                                .get(&(idx, code))
-                                .copied()
-                                .unwrap_or_else(|| match axis {
+                            let (min, max) = abs_min_max.get(&(idx, code)).copied().unwrap_or_else(
+                                || match axis {
                                     AbsoluteAxisCode::ABS_X
                                     | AbsoluteAxisCode::ABS_Y
                                     | AbsoluteAxisCode::ABS_RX
@@ -463,25 +482,18 @@ pub async fn spawn_input_task(
                                         (-1, 1)
                                     }
                                     _ => (0, 255),
-                                });
+                                },
+                            );
                             match axis {
-                                AbsoluteAxisCode::ABS_X => {
-                                    state.lx = norm_axis(value, min, max);
-                                }
-                                AbsoluteAxisCode::ABS_Y => {
-                                    state.ly = norm_axis(value, min, max);
-                                }
-                                AbsoluteAxisCode::ABS_RX => {
-                                    state.rx = norm_axis(value, min, max);
-                                }
-                                AbsoluteAxisCode::ABS_RY => {
-                                    state.ry = norm_axis(value, min, max);
-                                }
+                                AbsoluteAxisCode::ABS_X => state.lx = norm_axis(value, min, max),
+                                AbsoluteAxisCode::ABS_Y => state.ly = norm_axis(value, min, max),
+                                AbsoluteAxisCode::ABS_RX => state.rx = norm_axis(value, min, max),
+                                AbsoluteAxisCode::ABS_RY => state.ry = norm_axis(value, min, max),
                                 AbsoluteAxisCode::ABS_Z => {
-                                    state.lt = norm_trigger(value, min, max);
+                                    state.lt = norm_trigger(value, min, max)
                                 }
                                 AbsoluteAxisCode::ABS_RZ => {
-                                    state.rt = norm_trigger(value, min, max);
+                                    state.rt = norm_trigger(value, min, max)
                                 }
                                 AbsoluteAxisCode::ABS_HAT0X => {
                                     state.dpad_left = value < 0;
@@ -497,40 +509,28 @@ pub async fn spawn_input_task(
                         EventSummary::AbsoluteAxis(_, axis, value)
                             if *role == DeviceRole::Trackpad && !pad_saw_rel =>
                         {
-                            // Deltas only while finger is down. Ignore hover/rest ABS
-                            // (resting near the bottom edge was slamming the host cursor).
-                            let touching = state.trackpad_touch;
+                            if !state.trackpad_touch {
+                                continue;
+                            }
                             let entry = pad_last.entry(idx).or_insert((None, None));
                             match axis {
-                                AbsoluteAxisCode::ABS_X
-                                | AbsoluteAxisCode::ABS_MT_POSITION_X => {
-                                    if touching {
-                                        if let Some(prev) = entry.0 {
-                                            let d = (value - prev) as f32;
-                                            if d.abs() < 400.0 {
-                                                state.trackpad_dx +=
-                                                    (d * 0.05).clamp(-12.0, 12.0);
-                                            }
+                                AbsoluteAxisCode::ABS_X | AbsoluteAxisCode::ABS_MT_POSITION_X => {
+                                    if let Some(prev) = entry.0 {
+                                        let d = (value - prev) as f32;
+                                        if d.abs() < 400.0 {
+                                            state.trackpad_dx += (d * 0.05).clamp(-12.0, 12.0);
                                         }
-                                        entry.0 = Some(value);
-                                    } else {
-                                        *entry = (None, entry.1);
                                     }
+                                    entry.0 = Some(value);
                                 }
-                                AbsoluteAxisCode::ABS_Y
-                                | AbsoluteAxisCode::ABS_MT_POSITION_Y => {
-                                    if touching {
-                                        if let Some(prev) = entry.1 {
-                                            let d = (value - prev) as f32;
-                                            if d.abs() < 400.0 {
-                                                state.trackpad_dy +=
-                                                    (d * 0.05).clamp(-12.0, 12.0);
-                                            }
+                                AbsoluteAxisCode::ABS_Y | AbsoluteAxisCode::ABS_MT_POSITION_Y => {
+                                    if let Some(prev) = entry.1 {
+                                        let d = (value - prev) as f32;
+                                        if d.abs() < 400.0 {
+                                            state.trackpad_dy += (d * 0.05).clamp(-12.0, 12.0);
                                         }
-                                        entry.1 = Some(value);
-                                    } else {
-                                        *entry = (entry.0, None);
                                     }
+                                    entry.1 = Some(value);
                                 }
                                 _ => {}
                             }
@@ -546,29 +546,20 @@ pub async fn spawn_input_task(
                                 RelativeAxisCode::REL_Y => {
                                     state.trackpad_dy += (value as f32).clamp(-12.0, 12.0);
                                 }
-                                RelativeAxisCode::REL_WHEEL => {
-                                    state.trackpad_dy +=
-                                        (value as f32 * 2.0).clamp(-8.0, 8.0);
-                                }
                                 _ => {}
                             }
                         }
-                        // Swallow relative events on gamepad nodes (prevents stick→mouse leaks).
                         EventSummary::RelativeAxis(_, _, _) if *role == DeviceRole::Gamepad => {}
                         _ => {}
                     }
                 }
             }
 
-            // Cap per-frame mouse travel so a bad sample cannot slam the cursor.
             state.trackpad_dx = state.trackpad_dx.clamp(-20.0, 20.0);
             state.trackpad_dy = state.trackpad_dy.clamp(-20.0, 20.0);
 
-            tick += 1;
-            if got_event || tick % 2 == 0 {
-                if tx.send(InputEvent::State(state.clone())).await.is_err() {
-                    break;
-                }
+            if tx.send(InputEvent::State(state.clone())).await.is_err() {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(8)).await;
         }
