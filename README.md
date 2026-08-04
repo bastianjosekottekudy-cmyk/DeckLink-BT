@@ -25,11 +25,15 @@ DeckLink BT turns your Steam Deck into a BLE HID gamepad (HOGP). The host PC, ph
 ### From GitHub Releases (recommended)
 
 1. Download `decklink-bt-linux-x86_64.tar.gz` from the [latest release](https://github.com/bastianjosekottekudy-cmyk/DeckLink-BT/releases/latest).
-2. Extract and run:
+2. In Desktop Mode Konsole:
 
 ```bash
-./scripts/install-deck.sh ./decklink-bt-linux-x86_64.tar.gz
+cd ~/Downloads   # or wherever you saved the file
+tar -xzf decklink-bt-linux-x86_64.tar.gz
+bash decklink-bt-linux-x86_64/scripts/install-deck.sh ./decklink-bt-linux-x86_64.tar.gz
 ```
+
+Use `bash …` (not `./scripts/…`) so a missing execute bit cannot cause “Permission denied”. Enter your sudo password when prompted (udev + SteamOS read-only unlock).
 
 3. Return to **Gaming Mode**, launch **DeckLink BT**, tap **Start Advertising**, then pair from the host Bluetooth settings.
 
