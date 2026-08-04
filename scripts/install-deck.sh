@@ -168,12 +168,11 @@ Type=Application
 Categories=Game;Utility;
 EOF
 
-# --- Steam shortcut ----------------------------------------------------------
-STEAM_SCRIPT="${STEAM_SCRIPT:-${ROOT_DIR}/packaging/steam/add-nonsteam-shortcut.sh}"
-if [[ -f "$STEAM_SCRIPT" ]]; then
-  bash "$STEAM_SCRIPT" "$LAUNCH" || true
-else
-  echo "==> Add Non-Steam game manually: ${LAUNCH}"
+# Ensure launch wrapper exists / is refreshed for Gaming Mode
+if [[ -f "${INSTALL_DIR}/packaging/steam/add-nonsteam-shortcut.sh" ]]; then
+  bash "${INSTALL_DIR}/packaging/steam/add-nonsteam-shortcut.sh" "$LAUNCH" || true
+elif [[ -f "${ROOT_DIR}/packaging/steam/add-nonsteam-shortcut.sh" ]]; then
+  bash "${ROOT_DIR}/packaging/steam/add-nonsteam-shortcut.sh" "$LAUNCH" || true
 fi
 
 echo

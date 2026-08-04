@@ -103,6 +103,25 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
         .await
         .map_err(|e| BtError::Unavailable(e.to_string()))?;
 
+    // Required for host pairing / Gaming Mode reconnects after Desktop Mode bond
+    let _ = adapter.set_discoverable(true).await;
+    let _ = adapter.set_pairable(true).await;
+    if let Err(e) = adapter.set_discoverable_timeout(0).await {
+        warn!("discoverable_timeout: {e}");
+    }
+
+    // Just-Works / NoInputNoOutput agent so hosts can bond without a PIN UI on the Deck
+    let agent = bluer::agent::Agent {
+        request_default: true,
+        ..Default::default()
+    };
+    let agent_handle = session
+        .register_agent(agent)
+        .await
+        .map_err(|e| BtError::Message(format!("pairing agent failed: {e}")))?;
+    // Keep agent registered for the life of the process
+    std::mem::forget(agent_handle);
+
     let (report_tx, mut report_rx) = mpsc::channel::<HidPacket>(128);
     let (battery_tx, battery_rx) = watch::channel(100u8);
     let (event_tx, event_rx) = mpsc::channel::<BtEvent>(32);
@@ -322,6 +341,7 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
         discoverable: Some(true),
         local_name: Some(device_name.clone()),
         appearance: Some(APPEARANCE_GAMEPAD),
+        // 0 = advertise until stopped (BlueZ)
         duration: Some(Duration::from_secs(0)),
         ..Default::default()
     };

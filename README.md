@@ -35,7 +35,7 @@ bash decklink-bt-linux-x86_64/scripts/install-deck.sh ./decklink-bt-linux-x86_64
 
 Use `bash …` (not `./scripts/…`) so a missing execute bit cannot cause “Permission denied”. Enter your sudo password when prompted (udev + SteamOS read-only unlock).
 
-3. Return to **Gaming Mode**, launch **DeckLink BT**, tap **Start Advertising**, then pair from the host Bluetooth settings.
+3. Follow the **Gaming Mode checklist** below (Steam Input must be disabled).
 
 ### Build from source on Deck
 
@@ -45,6 +45,17 @@ cd DeckLink-BT
 cargo build --release -p decklink-app
 ./scripts/install-deck.sh
 ```
+
+## Gaming Mode checklist (required)
+
+Steam Gaming Mode often looks “connected once in Desktop but dead in Game Mode” unless you do this:
+
+1. Non-Steam shortcut should point at `~/.local/share/decklink-bt/launch.sh` (installer creates it; always passes `--advertise`).
+2. In Steam: **DeckLink BT → gear → Properties → Controller → Disable Steam Input**.  
+   If Steam Input stays on, Deck controls never reach DeckLink.
+3. Launch **DeckLink BT** from Gaming Mode — wait until status shows Advertising ON.
+4. On the **host**: connect to **DeckLink BT**. If an old Desktop Mode bond is stuck, **Forget** it on the host and pair again while Gaming Mode is advertising.
+5. Disconnect Deck Bluetooth headphones/audio while testing (Steam can hold the radio).
 
 ## Publishing releases (maintainers)
 
@@ -117,7 +128,10 @@ A thin plugin under [`packaging/decky`](packaging/decky) launches the installed 
 | Permission denied on `/dev/input` | Re-run install script (udev rules) or add user to `input` group |
 | Advertise fails | Ensure Bluetooth is on; close other BLE peripherals using the adapter |
 | Host does not see gamepad | Forget device, re-advertise, pair again; confirm HOGP/HID over GATT |
-| Steam Input conflicts | Launch DeckLink BT as Non-Steam game; disable Steam Input for it if needed |
+| Steam Input conflicts | Properties → Controller → **Disable Steam Input** for DeckLink BT |
+| Works in Desktop, not Gaming Mode | Use `launch.sh` wrapper; disable Steam Input; forget+re-pair on host |
+| Host pairs but no input | Steam Input still enabled, or advertising stopped when leaving Desktop Mode |
+| Advertise fails in Gaming Mode | Disconnect Deck Bluetooth headphones; ensure BlueZ/`bluetoothctl power on` |
 | High latency | Keep Deck close to host; some hosts ignore 7.5 ms interval requests |
 
 ## License
