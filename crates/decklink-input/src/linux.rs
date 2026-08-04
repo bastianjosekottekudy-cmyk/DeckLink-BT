@@ -342,16 +342,16 @@ async fn run_hidraw_loop(
                     set_silence_exclusive(&mut silence, true, false);
                     deck.feed_lizard();
                     hidraw_deck::set_kernel_lizard_mode(false);
-                    crate::steam_freeze::set_steam_frozen(true);
+                    // Do not SIGSTOP Steam here — it freezes Desktop Mode and
+                    // pairing feels "dead". Grabs + lizard + hidraw are enough.
                     info!(
-                        "local pointer silence ON ({} devices) — grabs held, Steam frozen",
+                        "local pointer silence ON ({} devices) — grabs held",
                         silence.len()
                     );
                 } else {
                     set_silence_exclusive(&mut silence, false, false);
                     hidraw_deck::set_kernel_lizard_mode(true);
-                    crate::steam_freeze::set_steam_frozen(false);
-                    info!("local pointer silence OFF — Steam resumed");
+                    info!("local pointer silence OFF");
                 }
             }
         }
@@ -382,7 +382,6 @@ async fn run_hidraw_loop(
 
     set_silence_exclusive(&mut silence, false, false);
     hidraw_deck::set_kernel_lizard_mode(true);
-    crate::steam_freeze::set_steam_frozen(false);
 }
 
 async fn spawn_evdev_fallback(

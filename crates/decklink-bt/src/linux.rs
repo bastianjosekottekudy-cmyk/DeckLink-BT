@@ -1,9 +1,11 @@
 //! BlueZ HOGP GATT server via bluer.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bluer::adv::{Advertisement, Type as AdvType};
+use bluer::Adapter;
 use bluer::agent::Agent;
 use bluer::gatt::local::{
     Application, Characteristic, CharacteristicNotify, CharacteristicNotifyMethod,
@@ -37,6 +39,41 @@ const UUID_MANUFACTURER: Uuid = uuid16(0x2A29);
 const UUID_MODEL: Uuid = uuid16(0x2A24);
 const UUID_PNP_ID: Uuid = uuid16(0x2A50);
 const UUID_BATTERY_LEVEL: Uuid = uuid16(0x2A19);
+
+/// Emit Connected once the host enables HID notify (CCCD). DeviceAdded alone is
+/// too early — Windows often pairs for several seconds before CCCDs are on.
+async fn announce_hid_host(
+    adapter: &Adapter,
+    event_tx: &mpsc::Sender<BtEvent>,
+    announced: &AtomicBool,
+) {
+    if announced.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let mut address = String::new();
+    let mut name = "HID host".to_string();
+    if let Ok(addrs) = adapter.device_addresses().await {
+        for addr in addrs {
+            if let Ok(dev) = adapter.device(addr) {
+                if matches!(dev.is_connected().await, Ok(true)) {
+                    let _ = dev.set_trusted(true).await;
+                    address = addr.to_string();
+                    name = dev
+                        .name()
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| address.clone());
+                    break;
+                }
+            }
+        }
+    }
+    info!("HID host ready: {name} ({address})");
+    let _ = event_tx
+        .send(BtEvent::Connected { address, name })
+        .await;
+}
 
 /// Input Report characteristic (Report Reference type = 0x01).
 ///
@@ -250,27 +287,35 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
     let (reg1_tx, mut reg1_rx) = mpsc::channel(8);
     let (reg2_tx, mut reg2_rx) = mpsc::channel(8);
     let (reg3_tx, mut reg3_rx) = mpsc::channel(8);
+    let hid_host_announced = Arc::new(AtomicBool::new(false));
 
     {
         let n1 = notifiers1.clone();
-        tokio::spawn(async move {
-            while let Some(tx) = reg1_rx.recv().await {
-                info!("HID report 1 (gamepad) notify session registered");
-                n1.lock().await.push(tx);
-            }
-        });
         let n2 = notifiers2.clone();
-        tokio::spawn(async move {
-            while let Some(tx) = reg2_rx.recv().await {
-                info!("HID report 2 (mouse) notify session registered");
-                n2.lock().await.push(tx);
-            }
-        });
         let n3 = notifiers3.clone();
+        let adapter_c = adapter.clone();
+        let event_tx_c = event_tx.clone();
+        let announced = hid_host_announced.clone();
         tokio::spawn(async move {
-            while let Some(tx) = reg3_rx.recv().await {
-                info!("HID report 3 (keyboard) notify session registered");
-                n3.lock().await.push(tx);
+            loop {
+                tokio::select! {
+                    Some(tx) = reg1_rx.recv() => {
+                        info!("HID report 1 (gamepad) notify session registered");
+                        n1.lock().await.push(tx);
+                        announce_hid_host(&adapter_c, &event_tx_c, &announced).await;
+                    }
+                    Some(tx) = reg2_rx.recv() => {
+                        info!("HID report 2 (mouse) notify session registered");
+                        n2.lock().await.push(tx);
+                        announce_hid_host(&adapter_c, &event_tx_c, &announced).await;
+                    }
+                    Some(tx) = reg3_rx.recv() => {
+                        info!("HID report 3 (keyboard) notify session registered");
+                        n3.lock().await.push(tx);
+                        announce_hid_host(&adapter_c, &event_tx_c, &announced).await;
+                    }
+                    else => break,
+                }
             }
         });
     }
@@ -483,6 +528,7 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
     let n1c = notifiers1.clone();
     let n2c = notifiers2.clone();
     let n3c = notifiers3.clone();
+    let announced_watch = hid_host_announced.clone();
     tokio::spawn(async move {
         while let Some(evt) = device_events.next().await {
             match evt {
@@ -498,37 +544,37 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                                 .ok()
                                 .flatten()
                                 .unwrap_or_else(|| addr.to_string());
-                            // Only treat as DeckLink host once HID notifies are on.
-                            // DeviceAdded alone fires for many non-HOGP Bluetooth peers.
+                            // Pairing + Windows HID stack often takes >5s after ACL up.
                             let n1c = n1c.clone();
                             let n2c = n2c.clone();
                             let n3c = n3c.clone();
-                            let event_tx2 = event_tx2.clone();
+                            let announced_watch = announced_watch.clone();
                             let addr_s = addr.to_string();
                             tokio::spawn(async move {
-                                for _ in 0..20 {
-                                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                for i in 0..120 {
+                                    if announced_watch.load(Ordering::SeqCst) {
+                                        return;
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                                     let c1 = n1c.lock().await.len();
                                     let c2 = n2c.lock().await.len();
                                     let c3 = n3c.lock().await.len();
                                     if c1 + c2 + c3 > 0 {
+                                        // announce_hid_host runs from notifier reg path
                                         info!(
-                                            "HID host {name} ({addr_s}) subscriptions: \
-                                             gamepad={c1} mouse={c2} keyboard={c3}"
+                                            "peer {name} ({addr_s}) HID CCCDs up after ~{}ms \
+                                             (gamepad={c1} mouse={c2} keyboard={c3})",
+                                            (i + 1) * 500
                                         );
-                                        let _ = event_tx2
-                                            .send(BtEvent::Connected {
-                                                address: addr_s,
-                                                name,
-                                            })
-                                            .await;
                                         return;
                                     }
                                 }
-                                warn!(
-                                    "BT peer {name} connected but never subscribed to HID — \
-                                     ignoring (not a DeckLink host)"
-                                );
+                                if !announced_watch.load(Ordering::SeqCst) {
+                                    warn!(
+                                        "BT peer {name} ({addr_s}) connected 60s with no HID \
+                                         notify — forget device on PC and re-pair DeckLink BT"
+                                    );
+                                }
                             });
                         }
                     }
@@ -539,6 +585,21 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                             address: addr.to_string(),
                         })
                         .await;
+                    // Allow a fresh Connected when the next host enables CCCDs.
+                    let mut any_connected = false;
+                    if let Ok(addrs) = adapter2.device_addresses().await {
+                        for a in addrs {
+                            if let Ok(dev) = adapter2.device(a) {
+                                if matches!(dev.is_connected().await, Ok(true)) {
+                                    any_connected = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if !any_connected {
+                        announced_watch.store(false, Ordering::SeqCst);
+                    }
                 }
                 _ => {}
             }
