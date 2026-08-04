@@ -184,7 +184,7 @@ async fn ensure_advertising(shared: &Arc<Mutex<Shared>>) -> Result<()> {
                 let mut g = shared.lock().unwrap();
                 g.advertising = true;
                 g.status =
-                    "Advertising — host sees gamepad + keyboard + mouse on one link".into();
+                    "Advertising as \"DeckLink BT\" — on the PC pair that name (not \"steamdeck\")".into();
                 g.hogp = Some(server);
             }
             sync_input_grab(shared);

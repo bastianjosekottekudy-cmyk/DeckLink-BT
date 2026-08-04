@@ -16,6 +16,8 @@ use crate::{read_battery_percent, InputCommand, InputError, InputEvent};
 enum DeviceRole {
     Gamepad,
     Trackpad,
+    /// Lizard / Steam Desktop mouse+keyboard — grab only (never feed host HID).
+    LocalPointer,
 }
 
 fn list_devices() -> Vec<(PathBuf, String)> {
@@ -61,11 +63,35 @@ fn score_gamepad(name: &str) -> i32 {
 
 fn score_trackpad(name: &str) -> i32 {
     let lower = name.to_ascii_lowercase();
+    // Real Deck touchpads — not the firmware "… Mouse" lizard interface.
     if lower.contains("touchpad") || lower.contains("trackpad") {
         return 80;
     }
-    if lower.contains("steam") && (lower.contains("pad") || lower.contains("mouse")) {
+    if lower.contains("steam") && lower.contains("pad") && !lower.contains("mouse") {
         return 50;
+    }
+    -100
+}
+
+/// Devices that move the *local* Desktop cursor (lizard mode / Steam Desktop Config).
+fn score_local_pointer(name: &str) -> i32 {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("decklink") {
+        return -100;
+    }
+    if (lower.contains("mouse") || lower.contains("keyboard") || lower.contains("consumer"))
+        && (lower.contains("steam")
+            || lower.contains("valve")
+            || lower.contains("deck")
+            || lower.contains("jupiter"))
+    {
+        return 90;
+    }
+    if lower.contains("extest") || (lower.contains("uinput") && lower.contains("mouse")) {
+        return 80;
+    }
+    if lower.contains("steam") && lower.contains("mouse") {
+        return 85;
     }
     -100
 }
@@ -119,8 +145,12 @@ fn apply_key(state: &mut ControllerState, code: KeyCode, pressed: bool) {
         KeyCode::BTN_TRIGGER_HAPPY2 => Some(GamepadButtons::R4),
         KeyCode::BTN_TRIGGER_HAPPY3 => Some(GamepadButtons::L5),
         KeyCode::BTN_TRIGGER_HAPPY4 => Some(GamepadButtons::R5),
-        KeyCode::BTN_LEFT => {
-            state.trackpad_click = pressed;
+        KeyCode::BTN_LEFT | KeyCode::BTN_TOOL_FINGER | KeyCode::BTN_TOUCH => {
+            if matches!(code, KeyCode::BTN_LEFT) {
+                state.trackpad_click = pressed;
+            } else {
+                state.trackpad_touch = pressed;
+            }
             None
         }
         _ => None,
@@ -156,20 +186,34 @@ fn open_device(path: &PathBuf, name: &str, role: DeviceRole) -> Result<Device, S
     let role_name = match role {
         DeviceRole::Gamepad => "gamepad",
         DeviceRole::Trackpad => "trackpad",
+        DeviceRole::LocalPointer => "local-pointer",
     };
     info!("opened {role_name} {} ({name})", path.display());
     Ok(d)
 }
 
-fn set_devices_exclusive(opened: &mut [(DeviceRole, String, Device)], exclusive: bool) {
+fn role_name(role: DeviceRole) -> &'static str {
+    match role {
+        DeviceRole::Gamepad => "gamepad",
+        DeviceRole::Trackpad => "trackpad",
+        DeviceRole::LocalPointer => "local-pointer",
+    }
+}
+
+fn set_devices_exclusive(
+    opened: &mut [(DeviceRole, String, Device)],
+    exclusive: bool,
+    quiet: bool,
+) {
     for (role, name, dev) in opened.iter_mut() {
-        let role_name = match role {
-            DeviceRole::Gamepad => "gamepad",
-            DeviceRole::Trackpad => "trackpad",
-        };
+        let role_name = role_name(*role);
         if exclusive {
             match dev.grab() {
-                Ok(()) => info!("exclusive grab on {role_name} ({name})"),
+                Ok(()) => {
+                    if !quiet {
+                        info!("exclusive grab on {role_name} ({name})");
+                    }
+                }
                 Err(e) => warn!("grab {role_name} ({name}) failed: {e}"),
             }
         } else {
@@ -188,11 +232,12 @@ pub async fn spawn_input_task(
     let devices = list_devices();
     for (path, name) in &devices {
         info!(
-            "input candidate: {} ({}) pad={} track={}",
+            "input candidate: {} ({}) pad={} track={} local={}",
             path.display(),
             name,
             score_gamepad(name),
-            score_trackpad(name)
+            score_trackpad(name),
+            score_local_pointer(name)
         );
     }
 
@@ -212,12 +257,20 @@ pub async fn spawn_input_task(
         .collect();
     tracks.sort_by(|a, b| b.0.cmp(&a.0));
 
+    let mut locals: Vec<_> = devices
+        .iter()
+        .cloned()
+        .map(|(path, name)| (score_local_pointer(&name), path, name))
+        .filter(|(s, _, _)| *s > 0)
+        .collect();
+    locals.sort_by(|a, b| b.0.cmp(&a.0));
+
     let mut opened: Vec<(DeviceRole, String, Device)> = Vec::new();
     let mut used_paths: HashSet<PathBuf> = HashSet::new();
 
     // Open without grab — exclusive grab is enabled only while BLE is active
     // so sticks return to Desktop mouse when disconnected.
-    for (_score, path, name) in pads.into_iter().take(3) {
+    for (_score, path, name) in pads.into_iter().take(5) {
         if !used_paths.insert(path.clone()) {
             continue;
         }
@@ -237,6 +290,16 @@ pub async fn spawn_input_task(
         }
     }
 
+    for (_score, path, name) in locals.into_iter().take(4) {
+        if !used_paths.insert(path.clone()) {
+            continue;
+        }
+        match open_device(&path, &name, DeviceRole::LocalPointer) {
+            Ok(d) => opened.push((DeviceRole::LocalPointer, name, d)),
+            Err(e) => warn!("{e}"),
+        }
+    }
+
     if opened.is_empty() {
         return Err(InputError::NoDevice);
     }
@@ -250,6 +313,9 @@ pub async fn spawn_input_task(
         let mut state = ControllerState::default();
         let mut abs_min_max: HashMap<(usize, u16), (i32, i32)> = HashMap::new();
         let mut exclusive = false;
+        let mut lizard: Option<crate::lizard::LizardGuard> = None;
+        // Absolute trackpad → relative mouse via deltas (never feed raw ABS as motion).
+        let mut pad_last: HashMap<usize, (Option<i32>, Option<i32>)> = HashMap::new();
 
         for (idx, (_role, _name, dev)) in opened.iter().enumerate() {
             if let Ok(abs_state) = dev.get_abs_state() {
@@ -267,13 +333,41 @@ pub async fn spawn_input_task(
                 let InputCommand::SetExclusive(want) = cmd;
                 if want != exclusive {
                     exclusive = want;
-                    set_devices_exclusive(&mut opened, exclusive);
+                    set_devices_exclusive(&mut opened, exclusive, false);
+                    if exclusive {
+                        lizard = crate::lizard::open_and_disable();
+                        if lizard.is_none() {
+                            warn!(
+                                "could not disable lizard mode via hidraw — hold MENU (⋯) once if Deck mouse still moves"
+                            );
+                        }
+                    } else {
+                        lizard = None;
+                        info!("lizard guard released — firmware Desktop mouse can return");
+                    }
+                }
+            }
+
+            // Re-assert grab + lizard heartbeat; Steam/hid-steam may steal focus back.
+            if exclusive {
+                if tick > 0 && tick % 100 == 0 {
+                    set_devices_exclusive(&mut opened, true, true);
+                    if let Some(g) = &lizard {
+                        g.feed_watchdog();
+                    } else {
+                        lizard = crate::lizard::open_and_disable();
+                    }
+                } else if tick % 100 == 50 {
+                    if let Some(g) = &lizard {
+                        g.feed_watchdog();
+                    }
                 }
             }
 
             state.clear_relative();
             state.battery_pct = read_battery_percent();
             let mut got_event = false;
+            let mut pad_saw_rel = false;
 
             for (idx, (role, _name, dev)) in opened.iter_mut().enumerate() {
                 let events = match dev.fetch_events() {
@@ -287,6 +381,38 @@ pub async fn spawn_input_task(
 
                 for ev in events {
                     got_event = true;
+                    // Grabbed lizard/Steam mouse: keep off the Deck Desktop, forward to host.
+                    if *role == DeviceRole::LocalPointer {
+                        match ev.destructure() {
+                            EventSummary::RelativeAxis(_, axis, value) => match axis {
+                                RelativeAxisCode::REL_X => {
+                                    state.trackpad_dx += (value as f32).clamp(-40.0, 40.0);
+                                }
+                                RelativeAxisCode::REL_Y => {
+                                    state.trackpad_dy += (value as f32).clamp(-40.0, 40.0);
+                                }
+                                RelativeAxisCode::REL_WHEEL => {
+                                    state.trackpad_dy +=
+                                        (value as f32 * 2.0).clamp(-20.0, 20.0);
+                                }
+                                _ => {}
+                            },
+                            EventSummary::Key(_, code, value) => {
+                                let pressed = value != 0;
+                                if matches!(code, KeyCode::BTN_LEFT) {
+                                    state.trackpad_click = pressed;
+                                }
+                                if matches!(
+                                    code,
+                                    KeyCode::BTN_TOUCH | KeyCode::BTN_TOOL_FINGER
+                                ) {
+                                    state.trackpad_touch = pressed;
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     match ev.destructure() {
                         EventSummary::Key(_, code, value) => {
                             // Keys from any grabbed gamepad/trackpad.
@@ -296,7 +422,17 @@ pub async fn spawn_input_task(
                                 // Extra gamepad nodes: still swallow via grab, ignore state.
                                 continue;
                             }
-                            apply_key(&mut state, code, value != 0);
+                            let pressed = value != 0;
+                            apply_key(&mut state, code, pressed);
+                            if *role == DeviceRole::Trackpad
+                                && matches!(
+                                    code,
+                                    KeyCode::BTN_TOUCH | KeyCode::BTN_TOOL_FINGER
+                                )
+                                && !pressed
+                            {
+                                pad_last.insert(idx, (None, None));
+                            }
                         }
                         EventSummary::AbsoluteAxis(_, axis, value)
                             if *role == DeviceRole::Gamepad
@@ -348,15 +484,29 @@ pub async fn spawn_input_task(
                             }
                         }
                         EventSummary::AbsoluteAxis(_, axis, value)
-                            if *role == DeviceRole::Trackpad =>
+                            if *role == DeviceRole::Trackpad && !pad_saw_rel =>
                         {
-                            // Trackpads only — never treat stick ABS devices as mouse.
+                            // Convert absolute pad position → movement delta.
+                            // Feeding raw ABS as dx/dy pins the host cursor in a corner.
+                            let entry = pad_last.entry(idx).or_insert((None, None));
                             match axis {
-                                AbsoluteAxisCode::ABS_X | AbsoluteAxisCode::ABS_MT_POSITION_X => {
-                                    state.trackpad_dx += norm_axis(value, 0, 1000) * 8.0;
+                                AbsoluteAxisCode::ABS_X
+                                | AbsoluteAxisCode::ABS_MT_POSITION_X => {
+                                    if let Some(prev) = entry.0 {
+                                        let d = (value - prev) as f32;
+                                        state.trackpad_dx += (d * 0.08).clamp(-25.0, 25.0);
+                                    }
+                                    entry.0 = Some(value);
+                                    state.trackpad_touch = true;
                                 }
-                                AbsoluteAxisCode::ABS_Y | AbsoluteAxisCode::ABS_MT_POSITION_Y => {
-                                    state.trackpad_dy += norm_axis(value, 0, 1000) * 8.0;
+                                AbsoluteAxisCode::ABS_Y
+                                | AbsoluteAxisCode::ABS_MT_POSITION_Y => {
+                                    if let Some(prev) = entry.1 {
+                                        let d = (value - prev) as f32;
+                                        state.trackpad_dy += (d * 0.08).clamp(-25.0, 25.0);
+                                    }
+                                    entry.1 = Some(value);
+                                    state.trackpad_touch = true;
                                 }
                                 _ => {}
                             }
@@ -364,11 +514,17 @@ pub async fn spawn_input_task(
                         EventSummary::RelativeAxis(_, axis, value)
                             if *role == DeviceRole::Trackpad =>
                         {
+                            pad_saw_rel = true;
+                            // Relative events are already deltas — do not amplify heavily.
                             match axis {
-                                RelativeAxisCode::REL_X => state.trackpad_dx += value as f32,
-                                RelativeAxisCode::REL_Y => state.trackpad_dy += value as f32,
+                                RelativeAxisCode::REL_X => {
+                                    state.trackpad_dx += (value as f32).clamp(-40.0, 40.0);
+                                }
+                                RelativeAxisCode::REL_Y => {
+                                    state.trackpad_dy += (value as f32).clamp(-40.0, 40.0);
+                                }
                                 RelativeAxisCode::REL_WHEEL => {
-                                    state.trackpad_dy += value as f32 * 2.0;
+                                    state.trackpad_dy += (value as f32 * 2.0).clamp(-20.0, 20.0);
                                 }
                                 _ => {}
                             }
@@ -379,6 +535,10 @@ pub async fn spawn_input_task(
                     }
                 }
             }
+
+            // Cap per-frame mouse travel so a bad sample cannot slam the cursor.
+            state.trackpad_dx = state.trackpad_dx.clamp(-60.0, 60.0);
+            state.trackpad_dy = state.trackpad_dy.clamp(-60.0, 60.0);
 
             tick += 1;
             if got_event || tick % 2 == 0 {

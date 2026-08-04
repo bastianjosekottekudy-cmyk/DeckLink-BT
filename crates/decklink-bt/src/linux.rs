@@ -173,6 +173,15 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
         .await
         .map_err(|e| BtError::Unavailable(e.to_string()))?;
 
+    // Windows shows the adapter Alias after connect (not just the adv local_name).
+    // Without this, the bond renames itself to the Deck system name "steamdeck".
+    let previous_alias = adapter.alias().await.unwrap_or_default();
+    if let Err(e) = adapter.set_alias(device_name.clone()).await {
+        warn!("set_alias({device_name}): {e}");
+    } else {
+        info!("adapter alias set to '{device_name}' (was '{previous_alias}')");
+    }
+
     // Best-effort only — Desktop Mode already has a system pairing agent.
     if let Err(e) = adapter.set_discoverable(true).await {
         warn!("set_discoverable: {e}");
@@ -516,6 +525,7 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
         }
     });
 
+    let adapter_restore = adapter.clone();
     tokio::spawn(async move {
         loop {
             if stop_rx.changed().await.is_err() {
@@ -525,6 +535,11 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                 info!("stopping HOGP server");
                 drop(adv_handle);
                 drop(app_handle);
+                // Restore system name ("steamdeck") when DeckLink stops.
+                if let Err(e) = adapter_restore.set_alias(previous_alias.clone()).await {
+                    warn!("restore alias: {e}");
+                    let _ = adapter_restore.set_alias(String::new()).await;
+                }
                 let _ = event_tx.send(BtEvent::Advertising(false)).await;
                 break;
             }

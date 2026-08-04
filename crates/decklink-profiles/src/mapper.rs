@@ -61,9 +61,9 @@ fn idle_mouse_keyboard() -> Vec<HidPacket> {
 fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     let mut packets = Vec::new();
 
-    let sens = 28.0;
-    let dx = (state.trackpad_dx * sens).clamp(-127.0, 127.0) as i8;
-    let dy = (state.trackpad_dy * sens).clamp(-127.0, 127.0) as i8;
+    // trackpad_* are already pixel-ish deltas; keep near 1:1 (old ×28 slammed the cursor).
+    let dx = state.trackpad_dx.round().clamp(-127.0, 127.0) as i8;
+    let dy = state.trackpad_dy.round().clamp(-127.0, 127.0) as i8;
     let mut buttons = MouseButtons::empty();
     if state.rt > 0.4 || state.trackpad_click {
         buttons |= MouseButtons::LEFT;
