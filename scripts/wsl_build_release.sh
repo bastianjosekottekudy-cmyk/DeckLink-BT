@@ -90,7 +90,12 @@ cp target/release/decklink-bt "$STAGE/"
 cp README.md LICENSE LICENSE-MIT LICENSE-APACHE "$STAGE/" 2>/dev/null || cp README.md LICENSE "$STAGE/"
 cp -r scripts packaging "$STAGE/"
 chmod +x "$STAGE/decklink-bt"
-find "$STAGE/scripts" "$STAGE/packaging" -type f -name '*.sh' -exec chmod +x {} +
+# Strip Windows CRLF so Deck Konsole/bash accepts set -o pipefail
+find "$STAGE/scripts" "$STAGE/packaging" -type f -name '*.sh' -print0 |
+  while IFS= read -r -d '' f; do
+    sed -i 's/\r$//' "$f"
+    chmod +x "$f"
+  done
 mkdir -p dist
 tar -czf dist/decklink-bt-linux-x86_64.tar.gz -C dist decklink-bt-linux-x86_64
 ls -la dist/decklink-bt-linux-x86_64.tar.gz
