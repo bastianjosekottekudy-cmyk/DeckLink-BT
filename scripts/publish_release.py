@@ -195,7 +195,7 @@ Steam Deck as a driverless BLE HOGP gamepad / keyboard+mouse.
 ### Install (Steam Deck Desktop Mode)
 1. Download `{TARBALL_NAME}` below
 2. Extract and run `bash scripts/install-deck.sh ./{TARBALL_NAME}`
-3. Desktop: **DeckLink BT** app menu · Gaming Mode: Non-Steam shortcut (disable Steam Input)
+3. Open **DeckLink BT** from the Desktop Mode app menu → advertise → pair on the host
 
 Same release tag is reused; assets are replaced on every publish. Version is not bumped automatically.
 """

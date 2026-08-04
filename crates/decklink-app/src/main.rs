@@ -33,10 +33,6 @@ struct Cli {
     #[arg(long)]
     advertise: bool,
 
-    /// Gaming Mode preset: auto-advertise; opens UI when possible (falls back to headless)
-    #[arg(long)]
-    gaming: bool,
-
     /// Override saved profile: gamepad (Xbox) | desktop (keyboard+mouse)
     #[arg(long)]
     profile: Option<String>,
@@ -91,16 +87,7 @@ async fn main() -> Result<()> {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
 
-    let mut cli = Cli::parse();
-    // Gaming Mode: advertise + try UI. Only --headless forces no window.
-    // Do not treat Desktop Plasma as Gaming Mode.
-    let gaming_env = std::env::var("DECKLINK_GAMING_MODE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if cli.gaming || gaming_env {
-        cli.advertise = true;
-        info!("Gaming Mode: advertise; UI unless --headless");
-    }
+    let cli = Cli::parse();
 
     if !cli.headless {
         if std::env::var_os("WINIT_UNIX_BACKEND").is_none() {

@@ -31,14 +31,10 @@ trap steamos_rw_end EXIT
 pkill -x decklink-bt 2>/dev/null || true
 pkill -f '[d]ecklink-bt' 2>/dev/null || true
 
-# App files
+# App files (includes legacy Gaming Mode launchers)
 rm -rf "${HOME}/.local/share/decklink-bt"
 rm -f "${HOME}/.local/bin/decklink-bt"
 rm -f "${HOME}/.local/share/applications/decklink-bt.desktop"
-# legacy / steam-named launchers
-rm -f "${HOME}/.local/share/decklink-bt/launch.sh" 2>/dev/null || true
-rm -f "${HOME}/.local/share/decklink-bt/DeckLink BT" 2>/dev/null || true
-rm -f "${HOME}/.local/share/decklink-bt/DeckLink BT.desktop" 2>/dev/null || true
 
 # Config
 rm -rf "${HOME}/.config/decklink-bt"
@@ -69,10 +65,7 @@ rm -rf "${HOME}/Downloads/decklink-bt-linux-x86_64" 2>/dev/null || true
 echo
 echo "Removed app files, config, desktop entry, udev rule, and Flatpak/Decky copies if present."
 echo
-echo "Manual (Steam):"
-echo "  Gaming Mode or Desktop Steam → Library → Non-Steam → DeckLink BT → Remove"
-echo
-echo "Manual (host PC / phone):"
-echo "  Bluetooth settings → Forget / remove 'DeckLink BT'"
+echo "If Steam still lists an old Non-Steam shortcut: Library → remove DeckLink BT / launch.sh."
+echo "On the host: Bluetooth → Forget / remove 'DeckLink BT'."
 echo
 echo "Done."

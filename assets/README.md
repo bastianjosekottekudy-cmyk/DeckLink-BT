@@ -1,2 +1,3 @@
-# Placeholder for Steam artwork / icons (optional).
-# Drop steam_portrait.png / steam_hero.png here for Non-Steam branding.
+# Optional branding assets
+
+Unused for the current Desktop Mode–only install. Kept for possible future store artwork.

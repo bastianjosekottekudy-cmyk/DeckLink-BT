@@ -124,9 +124,6 @@ elif [[ "$ARTIFACT" == *.tar.gz ]]; then
   if [[ -f "${INSTALL_DIR}/packaging/udev/99-decklink-bt.rules" ]]; then
     UDEV_RULE_SRC="${INSTALL_DIR}/packaging/udev/99-decklink-bt.rules"
   fi
-  if [[ -f "${INSTALL_DIR}/packaging/steam/add-nonsteam-shortcut.sh" ]]; then
-    STEAM_SCRIPT="${INSTALL_DIR}/packaging/steam/add-nonsteam-shortcut.sh"
-  fi
 else
   echo "Unsupported artifact: $ARTIFACT" >&2
   exit 1
@@ -154,35 +151,31 @@ if command -v usermod >/dev/null 2>&1; then
 fi
 steamos_rw_end
 
-# --- Desktop entry (UI; overwrite with env-safe Exec even if steam helper fails) -
+# --- Desktop Mode app menu entry ---------------------------------------------
 APPS="${HOME}/.local/share/applications"
 mkdir -p "$APPS"
 cat > "${APPS}/decklink-bt.desktop" <<EOF
 [Desktop Entry]
 Name=DeckLink BT
 Comment=Steam Deck as a BLE gamepad / keyboard+mouse
-Exec=env -u DECKLINK_GAMING_MODE WINIT_UNIX_BACKEND=x11 SLINT_BACKEND=winit ${LAUNCH} --advertise
+Exec=env WINIT_UNIX_BACKEND=x11 SLINT_BACKEND=winit ${LAUNCH} --advertise
 Icon=input-gaming
 Terminal=false
 Type=Application
 Categories=Game;Utility;
 EOF
 
-# Ensure launch wrapper exists / is refreshed for Gaming Mode
-if [[ -f "${INSTALL_DIR}/packaging/steam/add-nonsteam-shortcut.sh" ]]; then
-  bash "${INSTALL_DIR}/packaging/steam/add-nonsteam-shortcut.sh" "$LAUNCH" || true
-elif [[ -f "${ROOT_DIR}/packaging/steam/add-nonsteam-shortcut.sh" ]]; then
-  bash "${ROOT_DIR}/packaging/steam/add-nonsteam-shortcut.sh" "$LAUNCH" || true
-fi
+# Remove legacy Gaming Mode / Non-Steam launchers from older installs
+rm -f "${INSTALL_DIR}/launch.sh" \
+  "${INSTALL_DIR}/DeckLink BT" \
+  "${INSTALL_DIR}/DeckLink BT.desktop" 2>/dev/null || true
 
 echo
-echo "Done."
-echo "  Launch (Desktop UI): ${LAUNCH}"
-echo "  Launch (Gaming Mode Steam target): ${HOME}/.local/share/decklink-bt/DeckLink BT"
-echo "Remove any Steam shortcut still named launch.sh, then use 'DeckLink BT'."
-echo "Switch modes: Select+Start on Deck, or Xbox / Keyboard+Mouse tabs in the UI."
-echo "Then: Start Advertising / auto-advertise → pair from host Bluetooth settings."
+echo "Done. Desktop Mode only — launch from the application menu: DeckLink BT"
+echo "  Binary: ${LAUNCH}"
+echo "  Switch Xbox ↔ Keyboard+Mouse: UI tabs, or Select+Start on the Deck"
+echo "  Then advertise → pair from host Bluetooth settings."
 echo
+echo "If you still have an old Steam Non-Steam shortcut named DeckLink BT / launch.sh, remove it."
 echo "If sudo/udev failed: open Konsole and re-run with a password prompt available."
-echo "If you still see Permission denied on the script itself, run:"
-echo "  bash scripts/install-deck.sh ./decklink-bt-linux-x86_64.tar.gz"
+echo "If Permission denied on the script: bash scripts/install-deck.sh ./decklink-bt-linux-x86_64.tar.gz"

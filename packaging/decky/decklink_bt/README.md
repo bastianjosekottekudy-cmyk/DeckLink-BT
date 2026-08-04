@@ -1,9 +1,8 @@
 # DeckLink BT Decky plugin
 
-Launch the installed DeckLink BT Flatpak or `~/.local/bin/decklink-bt`.
+Optional helper. **Supported use is Desktop Mode** via the application menu after `scripts/install-deck.sh`.
 
-## Install
+This plugin only launches the installed binary/Flatpak; prefer Desktop Mode for the full UI (Xbox / Keyboard+Mouse).
 
-1. Install DeckLink BT with `scripts/install-deck.sh`.
-2. Copy this folder to `~/homebrew/plugins/decklink_bt`.
-3. Restart Decky Loader.
+1. Install DeckLink BT with `scripts/install-deck.sh` in Desktop Mode.
+2. Optionally copy this folder into `~/homebrew/plugins/`.
