@@ -1,6 +1,6 @@
 use decklink_hid::{
-    ControllerState, GamepadButtons, GamepadReport, HidPacket, MediaKeys, MouseButtons,
-    GAMEPAD_REPORT_ID, MEDIA_REPORT_ID, MOUSE_REPORT_ID,
+    hid_key, ControllerState, GamepadButtons, HidPacket, KeyModifiers, KeyboardReport,
+    MouseButtons, MouseReport, GAMEPAD_REPORT_ID, KEYBOARD_REPORT_ID, MOUSE_REPORT_ID,
 };
 
 use crate::Profile;
@@ -26,24 +26,18 @@ pub fn map_state(profile: Profile, state: &ControllerState) -> MappedOutput {
             out.packets.push(state.gamepad_packet());
         }
         Profile::Desktop => {
-            out.packets.extend(map_desktop(state));
-        }
-        Profile::Flight => {
-            out.packets.push(map_flight(state));
-        }
-        Profile::Racing => {
-            out.packets.push(map_racing(state));
+            out.packets.extend(map_keyboard_mouse(state));
         }
     }
 
     out
 }
 
-fn map_desktop(state: &ControllerState) -> Vec<HidPacket> {
+/// Keyboard & Mouse: right trackpad → mouse; buttons/D-pad/left-stick → keys.
+fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     let mut packets = Vec::new();
 
-    // Right trackpad → mouse; L2/R2 → right/left click (plan: RT left, LT right)
-    let sens = 24.0;
+    let sens = 28.0;
     let dx = (state.trackpad_dx * sens).clamp(-127.0, 127.0) as i8;
     let dy = (state.trackpad_dy * sens).clamp(-127.0, 127.0) as i8;
     let mut buttons = MouseButtons::empty();
@@ -56,97 +50,86 @@ fn map_desktop(state: &ControllerState) -> Vec<HidPacket> {
     if state.buttons.contains(GamepadButtons::R3) {
         buttons |= MouseButtons::MIDDLE;
     }
-    let mouse = MouseReportLite { buttons, dx, dy, wheel: 0 };
-    if !mouse.is_idle() {
-        packets.push(HidPacket {
-            report_id: MOUSE_REPORT_ID,
-            data: mouse.pack().to_vec(),
-        });
-    }
+    // Always notify so button releases reach the host
+    let mouse = MouseReport {
+        buttons,
+        dx,
+        dy,
+        wheel: 0,
+    };
+    packets.push(HidPacket {
+        report_id: MOUSE_REPORT_ID,
+        data: mouse.pack().to_vec(),
+    });
 
-    // Media: face / bumpers
-    let mut keys = MediaKeys::empty();
-    if state.buttons.contains(GamepadButtons::A) {
-        keys |= MediaKeys::PLAY;
+    let mut kb = KeyboardReport::default();
+    if state.buttons.contains(GamepadButtons::L1) {
+        kb.modifiers |= KeyModifiers::LEFT_CTRL;
     }
     if state.buttons.contains(GamepadButtons::R1) {
-        keys |= MediaKeys::NEXT;
+        kb.modifiers |= KeyModifiers::LEFT_SHIFT;
     }
-    if state.buttons.contains(GamepadButtons::L1) {
-        keys |= MediaKeys::PREV;
-    }
-    if state.buttons.contains(GamepadButtons::Y) {
-        keys |= MediaKeys::VOL_UP;
-    }
-    if state.buttons.contains(GamepadButtons::X) {
-        keys |= MediaKeys::VOL_DOWN;
-    }
-    if state.buttons.contains(GamepadButtons::B) {
-        keys |= MediaKeys::MUTE;
+    if state.buttons.contains(GamepadButtons::SELECT) {
+        kb.modifiers |= KeyModifiers::LEFT_ALT;
     }
     if state.buttons.contains(GamepadButtons::GUIDE) {
-        keys |= MediaKeys::HOME;
-    }
-    if !keys.is_empty() {
-        packets.push(HidPacket {
-            report_id: MEDIA_REPORT_ID,
-            data: [keys.bits()].to_vec(),
-        });
+        kb.modifiers |= KeyModifiers::LEFT_GUI;
     }
 
-    // Still emit a quiet gamepad so hosts that expect one stay happy
-    packets.push(state.gamepad_packet());
+    if state.dpad_up {
+        kb.push_key(hid_key::UP);
+    }
+    if state.dpad_down {
+        kb.push_key(hid_key::DOWN);
+    }
+    if state.dpad_left {
+        kb.push_key(hid_key::LEFT);
+    }
+    if state.dpad_right {
+        kb.push_key(hid_key::RIGHT);
+    }
+    if state.buttons.contains(GamepadButtons::A) {
+        kb.push_key(hid_key::ENTER);
+    }
+    if state.buttons.contains(GamepadButtons::B) {
+        kb.push_key(hid_key::ESCAPE);
+    }
+    if state.buttons.contains(GamepadButtons::X) {
+        kb.push_key(hid_key::BACKSPACE);
+    }
+    if state.buttons.contains(GamepadButtons::Y) {
+        kb.push_key(hid_key::SPACE);
+    }
+    if state.buttons.contains(GamepadButtons::START) {
+        kb.push_key(hid_key::TAB);
+    }
+    if state.buttons.contains(GamepadButtons::L4) {
+        kb.push_key(hid_key::PAGE_UP);
+    }
+    if state.buttons.contains(GamepadButtons::R4) {
+        kb.push_key(hid_key::PAGE_DOWN);
+    }
+
+    // Left stick → WASD
+    if state.ly < -0.45 {
+        kb.push_key(hid_key::W);
+    }
+    if state.ly > 0.45 {
+        kb.push_key(hid_key::S);
+    }
+    if state.lx < -0.45 {
+        kb.push_key(hid_key::A);
+    }
+    if state.lx > 0.45 {
+        kb.push_key(hid_key::D);
+    }
+
+    packets.push(HidPacket {
+        report_id: KEYBOARD_REPORT_ID,
+        data: kb.pack().to_vec(),
+    });
+
     packets
-}
-
-/// Flight: sticks as axes, triggers as throttle/rudder blend on Z/Rz already present.
-fn map_flight(state: &ControllerState) -> HidPacket {
-    let mut g = state.to_gamepad_report();
-    // Exaggerate stick precision for flight; use L4/R4 as extra buttons already in mask
-    g.lx = GamepadReport::axis_from_f32(state.lx);
-    g.ly = GamepadReport::axis_from_f32(state.ly);
-    g.rx = GamepadReport::axis_from_f32(state.rx);
-    g.ry = GamepadReport::axis_from_f32(state.ry);
-    // Left stick Y also drives “throttle feel” onto LT when LT idle
-    if state.lt < 0.05 {
-        g.lt = GamepadReport::trigger_from_f32((-state.ly).clamp(0.0, 1.0));
-    }
-    HidPacket {
-        report_id: GAMEPAD_REPORT_ID,
-        data: g.pack().to_vec(),
-    }
-}
-
-/// Racing: yaw gyro steers left stick X; accelerate/brake on triggers.
-fn map_racing(state: &ControllerState) -> HidPacket {
-    let mut g = state.to_gamepad_report();
-    // gyro_y ~ yaw rate; scale into steer axis
-    let steer = (state.gyro_y * 0.35 + state.lx * 0.25).clamp(-1.0, 1.0);
-    g.lx = GamepadReport::axis_from_f32(steer);
-    g.ly = 0;
-    g.lt = GamepadReport::trigger_from_f32(state.lt); // brake
-    g.rt = GamepadReport::trigger_from_f32(state.rt); // throttle
-    HidPacket {
-        report_id: GAMEPAD_REPORT_ID,
-        data: g.pack().to_vec(),
-    }
-}
-
-/// Local mouse helper to avoid re-export churn.
-struct MouseReportLite {
-    buttons: MouseButtons,
-    dx: i8,
-    dy: i8,
-    wheel: i8,
-}
-
-impl MouseReportLite {
-    fn pack(&self) -> [u8; 4] {
-        [self.buttons.bits(), self.dx as u8, self.dy as u8, self.wheel as u8]
-    }
-    fn is_idle(&self) -> bool {
-        self.buttons.is_empty() && self.dx == 0 && self.dy == 0 && self.wheel == 0
-    }
 }
 
 #[cfg(test)]
@@ -162,13 +145,14 @@ mod tests {
     }
 
     #[test]
-    fn racing_uses_gyro() {
+    fn keyboard_mouse_emits_mouse_and_keyboard() {
         let mut s = ControllerState::default();
-        s.gyro_y = 2.0;
-        let o = map_state(Profile::Racing, &s);
-        assert_eq!(o.packets.len(), 1);
-        let data = &o.packets[0].data;
-        let lx = i16::from_le_bytes([data[3], data[4]]);
-        assert!(lx != 0);
+        s.trackpad_dx = 2.0;
+        s.buttons.insert(GamepadButtons::A);
+        let o = map_state(Profile::Desktop, &s);
+        assert_eq!(o.packets.len(), 2);
+        assert_eq!(o.packets[0].report_id, MOUSE_REPORT_ID);
+        assert_eq!(o.packets[1].report_id, KEYBOARD_REPORT_ID);
+        assert_eq!(o.packets[1].data[2], hid_key::ENTER);
     }
 }

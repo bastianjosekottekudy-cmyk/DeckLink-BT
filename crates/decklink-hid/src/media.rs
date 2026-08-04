@@ -1,7 +1,7 @@
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
-pub const MEDIA_REPORT_ID: u8 = 3;
+pub const MEDIA_REPORT_ID: u8 = 4; // unused in current Report Map (keyboard owns id 3)
 pub const MEDIA_REPORT_LEN: usize = 1;
 
 bitflags! {

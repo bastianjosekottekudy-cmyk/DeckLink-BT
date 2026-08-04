@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    GamepadButtons, GamepadReport, Hat, HidPacket, MediaKeys, MediaReport, MouseButtons,
-    MouseReport, GAMEPAD_REPORT_ID, MEDIA_REPORT_ID, MOUSE_REPORT_ID,
+    GamepadButtons, GamepadReport, Hat, HidPacket, KeyModifiers, KeyboardReport, MediaKeys,
+    MediaReport, MouseButtons, MouseReport, GAMEPAD_REPORT_ID, KEYBOARD_REPORT_ID,
+    MEDIA_REPORT_ID, MOUSE_REPORT_ID,
 };
 
 /// Aggregated live controller state from Deck hardware (pre-profile mapping).
@@ -89,6 +90,14 @@ impl ControllerState {
         let r = MediaReport { keys };
         HidPacket {
             report_id: MEDIA_REPORT_ID,
+            data: r.pack().to_vec(),
+        }
+    }
+
+    pub fn keyboard_packet(&self, modifiers: KeyModifiers, keys: [u8; 6]) -> HidPacket {
+        let r = KeyboardReport { modifiers, keys };
+        HidPacket {
+            report_id: KEYBOARD_REPORT_ID,
             data: r.pack().to_vec(),
         }
     }

@@ -6,34 +6,25 @@ mod store;
 pub use mapper::{map_state, MappedOutput, ProfileKind};
 pub use store::{AppConfig, PairedTarget, ProfileStore};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Profile {
     #[default]
     Gamepad,
+    /// Trackpad mouse + face-button / stick keyboard.
     Desktop,
-    Flight,
-    Racing,
 }
 
 impl Profile {
     pub fn all() -> &'static [Profile] {
-        &[
-            Profile::Gamepad,
-            Profile::Desktop,
-            Profile::Flight,
-            Profile::Racing,
-        ]
+        &[Profile::Gamepad, Profile::Desktop]
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Profile::Gamepad => "Gamepad (Xbox)",
-            Profile::Desktop => "Desktop & Media",
-            Profile::Flight => "Flight Sim",
-            Profile::Racing => "Racing (Gyro)",
+            Profile::Gamepad => "Xbox Controller",
+            Profile::Desktop => "Keyboard & Mouse",
         }
     }
 
@@ -41,19 +32,32 @@ impl Profile {
         match self {
             Profile::Gamepad => "gamepad",
             Profile::Desktop => "desktop",
-            Profile::Flight => "flight",
-            Profile::Racing => "racing",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
-            "gamepad" | "xbox" => Some(Profile::Gamepad),
-            "desktop" | "media" => Some(Profile::Desktop),
-            "flight" => Some(Profile::Flight),
-            "racing" | "gyro" => Some(Profile::Racing),
+            "gamepad" | "xbox" | "controller" => Some(Profile::Gamepad),
+            "desktop" | "media" | "keyboard" | "mouse" | "keyboard_mouse" | "km" => {
+                Some(Profile::Desktop)
+            }
+            // Legacy profiles → Xbox
+            "flight" | "racing" | "gyro" => Some(Profile::Gamepad),
             _ => None,
         }
+    }
+}
+
+impl Serialize for Profile {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Profile {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(Profile::parse(&s).unwrap_or_default())
     }
 }
 

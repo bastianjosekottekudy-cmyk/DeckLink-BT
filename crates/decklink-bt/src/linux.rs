@@ -42,13 +42,15 @@ fn report_characteristic(
     latest: Arc<Mutex<Vec<u8>>>,
     notifier_reg: mpsc::Sender<mpsc::Sender<Vec<u8>>>,
 ) -> Characteristic {
-    let report_ref = vec![report_id, 0x01];
+    let report_ref = vec![report_id, 0x01]; // Report ID, Input Report
     let latest_r = latest.clone();
 
     Characteristic {
         uuid: UUID_REPORT,
         read: Some(CharacteristicRead {
             read: true,
+            // HOGP requires an encrypted link; ask BlueZ to enforce on read.
+            encrypt_read: true,
             fun: Box::new(move |_req| {
                 let latest_r = latest_r.clone();
                 Box::pin(async move { Ok(latest_r.lock().await.clone()) })
@@ -60,6 +62,7 @@ fn report_characteristic(
             method: CharacteristicNotifyMethod::Fun(Box::new(move |mut notifier| {
                 let notifier_reg = notifier_reg.clone();
                 Box::pin(async move {
+                    info!("host subscribed to HID report {report_id} notifications");
                     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
                     let _ = notifier_reg.send(tx).await;
                     tokio::spawn(async move {
@@ -68,6 +71,7 @@ fn report_characteristic(
                                 break;
                             }
                         }
+                        info!("HID report {report_id} notification session ended");
                     });
                 })
             })),
@@ -119,9 +123,9 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
     let (event_tx, event_rx) = mpsc::channel::<BtEvent>(32);
     let (stop_tx, mut stop_rx) = watch::channel(false);
 
-    let latest1 = Arc::new(Mutex::new(vec![0u8; 13]));
-    let latest2 = Arc::new(Mutex::new(vec![0u8; 4]));
-    let latest3 = Arc::new(Mutex::new(vec![0u8; 1]));
+    let latest1 = Arc::new(Mutex::new(vec![0u8; 13])); // gamepad
+    let latest2 = Arc::new(Mutex::new(vec![0u8; 4])); // mouse
+    let latest3 = Arc::new(Mutex::new(vec![0u8; 8])); // keyboard
 
     let notifiers1: Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
     let notifiers2: Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -401,8 +405,23 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                 _ => continue,
             };
             *latest.lock().await = pkt.data.clone();
-            for n in notifiers.lock().await.iter() {
-                let _ = n.send(pkt.data.clone()).await;
+            let mut dead = Vec::new();
+            {
+                let ns = notifiers.lock().await;
+                if ns.is_empty() && pkt.report_id == 1 {
+                    // Host connected but has not enabled CCCD yet — common until bond completes.
+                }
+                for (i, n) in ns.iter().enumerate() {
+                    if n.send(pkt.data.clone()).await.is_err() {
+                        dead.push(i);
+                    }
+                }
+            }
+            if !dead.is_empty() {
+                let mut ns = notifiers.lock().await;
+                for i in dead.into_iter().rev() {
+                    ns.swap_remove(i);
+                }
             }
         }
     });

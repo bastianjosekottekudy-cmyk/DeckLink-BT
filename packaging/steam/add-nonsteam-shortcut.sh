@@ -50,7 +50,7 @@ cat > "$DESKTOP_UI" <<EOF
 [Desktop Entry]
 Name=${NAME}
 Comment=Steam Deck as a BLE gamepad
-Exec=env -u DECKLINK_GAMING_MODE ${LAUNCH_BIN} --advertise
+Exec=env -u DECKLINK_GAMING_MODE WINIT_UNIX_BACKEND=x11 SLINT_BACKEND=winit ${LAUNCH_BIN} --advertise
 Icon=input-gaming
 Terminal=false
 Type=Application

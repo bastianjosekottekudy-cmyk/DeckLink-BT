@@ -1,14 +1,19 @@
-//! HID report descriptors and packers for DeckLink BT (HOGP gamepad + mouse + media).
+//! HID report descriptors and packers for DeckLink BT (HOGP gamepad + mouse + keyboard).
 
 mod descriptor;
 mod gamepad;
 mod mouse;
+mod keyboard;
 mod media;
 mod state;
 
 pub use descriptor::{HID_REPORT_MAP, APPEARANCE_GAMEPAD};
 pub use gamepad::{GamepadButtons, GamepadReport, Hat, GAMEPAD_REPORT_ID, GAMEPAD_REPORT_LEN};
 pub use mouse::{MouseButtons, MouseReport, MOUSE_REPORT_ID, MOUSE_REPORT_LEN};
+pub use keyboard::{
+    from_char as hid_from_char, key as hid_key, KeyModifiers, KeyboardReport, KEYBOARD_REPORT_ID,
+    KEYBOARD_REPORT_LEN,
+};
 pub use media::{MediaKeys, MediaReport, MEDIA_REPORT_ID, MEDIA_REPORT_LEN};
 pub use state::ControllerState;
 

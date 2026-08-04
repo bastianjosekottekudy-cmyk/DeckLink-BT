@@ -1,4 +1,4 @@
-//! Standard BLE HID Report Map: Gamepad (1) + Mouse (2) + Consumer Control (3).
+//! Standard BLE HID Report Map: Gamepad (1) + Mouse (2) + Keyboard (3).
 
 /// Bluetooth Appearance value for Generic Gamepad (0x03C4).
 pub const APPEARANCE_GAMEPAD: u16 = 0x03C4;
@@ -7,7 +7,7 @@ pub const APPEARANCE_GAMEPAD: u16 = 0x03C4;
 ///
 /// Report ID 1 — Game Pad (Xbox-style): 16 buttons, hat, 6 axes (LX LY RX RY LT RT)
 /// Report ID 2 — Mouse: buttons + relative X/Y + wheel
-/// Report ID 3 — Consumer Control: Play/Pause, Next, Prev, Vol+/-, Mute
+/// Report ID 3 — Keyboard: modifiers + 6-key rollover
 pub const HID_REPORT_MAP: &[u8] = &[
     // ===== Report ID 1: Game Pad =====
     0x05, 0x01, // Usage Page (Generic Desktop)
@@ -88,23 +88,29 @@ pub const HID_REPORT_MAP: &[u8] = &[
     0xC0,       //   End Collection
     0xC0,       // End Collection
 
-    // ===== Report ID 3: Consumer Control =====
-    0x05, 0x0C, // Usage Page (Consumer)
-    0x09, 0x01, // Usage (Consumer Control)
+    // ===== Report ID 3: Keyboard =====
+    0x05, 0x01, // Usage Page (Generic Desktop)
+    0x09, 0x06, // Usage (Keyboard)
     0xA1, 0x01, // Collection (Application)
     0x85, 0x03, //   Report ID (3)
+    0x05, 0x07, //   Usage Page (Key Codes)
+    0x19, 0xE0, //   Usage Minimum (Left Control)
+    0x29, 0xE7, //   Usage Maximum (Right GUI)
     0x15, 0x00, //   Logical Minimum (0)
     0x25, 0x01, //   Logical Maximum (1)
     0x75, 0x01, //   Report Size (1)
     0x95, 0x08, //   Report Count (8)
-    0x09, 0xB5, //   Usage (Scan Next Track)
-    0x09, 0xB6, //   Usage (Scan Previous Track)
-    0x09, 0xB7, //   Usage (Stop)
-    0x09, 0xCD, //   Usage (Play/Pause)
-    0x09, 0xE2, //   Usage (Mute)
-    0x09, 0xE9, //   Usage (Volume Increment)
-    0x09, 0xEA, //   Usage (Volume Decrement)
-    0x0A, 0x23, 0x02, // Usage (AC Home)
-    0x81, 0x02, //   Input (Data,Var,Abs)
+    0x81, 0x02, //   Input (Data,Var,Abs) — modifiers
+    0x95, 0x01, //   Report Count (1)
+    0x75, 0x08, //   Report Size (8)
+    0x81, 0x03, //   Input (Const) — reserved
+    0x95, 0x06, //   Report Count (6)
+    0x75, 0x08, //   Report Size (8)
+    0x15, 0x00, //   Logical Minimum (0)
+    0x25, 0x65, //   Logical Maximum (101)
+    0x05, 0x07, //   Usage Page (Key Codes)
+    0x19, 0x00, //   Usage Minimum (0)
+    0x29, 0x65, //   Usage Maximum (101)
+    0x81, 0x00, //   Input (Data,Array)
     0xC0,       // End Collection
 ];

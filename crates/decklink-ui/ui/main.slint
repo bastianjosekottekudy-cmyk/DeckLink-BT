@@ -1,4 +1,99 @@
-import { Button, VerticalBox, HorizontalBox, ComboBox } from "std-widgets.slint";
+import { Button, VerticalBox, HorizontalBox, LineEdit } from "std-widgets.slint";
+
+component KeyCap inherits Rectangle {
+    in property <string> label;
+    in property <int> code;
+    in property <bool> wide: false;
+    in property <bool> accent: false;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    callback tapped(int);
+
+    min-width: wide ? 72px : 42px;
+    preferred-height: 44px;
+    horizontal-stretch: 1;
+    border-radius: 8px;
+    background: !enabled ? #1a222c :
+        active ? #2a5a8a :
+        accent ? #1e3a4f :
+        #1c2630;
+    border-width: 1px;
+    border-color: active ? #5eb0ff : #2a3542;
+
+    Text {
+        width: 100%; height: 100%;
+        text: root.label;
+        color: !root.enabled ? #4a5a6a : root.accent ? #7ec8ff : #e8eef5;
+        font-size: 14px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.tapped(root.code); }
+    }
+}
+
+component ModCap inherits Rectangle {
+    in property <string> label;
+    in property <int> mask;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    callback toggled(int);
+
+    min-width: 64px;
+    preferred-height: 40px;
+    border-radius: 8px;
+    background: active ? #3a6b3a : #1c2630;
+    border-width: 1px;
+    border-color: active ? #3dd68c : #2a3542;
+
+    Text {
+        width: 100%; height: 100%;
+        text: root.label;
+        color: root.active ? #3dd68c : #e8eef5;
+        font-size: 14px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.toggled(root.mask); }
+    }
+}
+
+component MouseBtn inherits Rectangle {
+    in property <string> label;
+    in property <int> mask;
+    in property <bool> enabled: true;
+    callback pressed-changed(int, bool);
+
+    border-radius: 8px;
+    background: #1c2630;
+    preferred-height: 40px;
+    preferred-width: 72px;
+    border-width: 1px;
+    border-color: #2a3542;
+
+    Text {
+        width: 100%; height: 100%;
+        text: root.label;
+        color: #e8eef5;
+        font-size: 13px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        pressed-changed => { root.pressed-changed(root.mask, self.pressed); }
+    }
+}
 
 export component MainWindow inherits Window {
     title: "DeckLink BT";
@@ -12,121 +107,364 @@ export component MainWindow inherits Window {
     in-out property <bool> connected: false;
     in-out property <string> peer-name: "—";
     in-out property <[string]> profile-options: [
-        "Gamepad (Xbox)",
-        "Desktop & Media",
-        "Flight Sim",
-        "Racing (Gyro)",
+        "Xbox Controller",
+        "Keyboard & Mouse",
     ];
     in-out property <int> selected-profile: 0;
     in-out property <string> targets-text: "(none yet)";
+    in-out property <int> sticky-mods: 0;
+    in-out property <string> type-buffer: "";
+    in-out property <float> pad-sensitivity: 1.4;
 
     callback start-advertise();
     callback stop-advertise();
     callback profile-changed(int);
     callback refresh-targets();
+    callback key-tap(int);
+    callback mod-toggle(int);
+    callback mouse-delta(float, float);
+    callback mouse-button(int, bool);
+    callback type-char(string);
+    callback clear-mods();
+
+    property <bool> km: selected-profile == 1;
+    property <bool> input-ok: advertising || connected;
 
     VerticalBox {
-        padding: 32px;
-        spacing: 20px;
+        padding: 12px;
+        spacing: 8px;
 
-        Text {
-            text: "DeckLink BT";
-            color: #e8eef5;
-            font-size: 42px;
-            font-weight: 700;
-        }
-
-        Text {
-            text: "Steam Deck → driverless BLE gamepad";
-            color: #8aa0b5;
-            font-size: 18px;
-        }
-
+        // —— Compact header ——
         HorizontalBox {
-            spacing: 24px;
+            spacing: 12px;
             Text {
-                text: advertising ? "Advertising: ON" : "Advertising: OFF";
-                color: advertising ? #3dd68c : #f07178;
-                font-size: 20px;
-                font-weight: 600;
-            }
-            Text {
-                text: connected ? "Connected: " + peer-name : "Connected: no";
-                color: connected ? #3dd68c : #8aa0b5;
-                font-size: 20px;
-            }
-            Text {
-                text: "Battery " + battery-pct + "%";
+                text: "DeckLink BT";
                 color: #e8eef5;
-                font-size: 20px;
-            }
-        }
-
-        Text {
-            text: status-text;
-            color: #c5d4e3;
-            font-size: 16px;
-            wrap: word-wrap;
-        }
-
-        HorizontalBox {
-            spacing: 16px;
-            Text {
-                text: "Profile";
-                color: #8aa0b5;
-                font-size: 18px;
+                font-size: 22px;
+                font-weight: 700;
                 vertical-alignment: center;
             }
-            ComboBox {
-                model: root.profile-options;
-                current-index <=> root.selected-profile;
-                selected => {
-                    root.profile-changed(root.selected-profile);
-                }
+            Text {
+                text: advertising ? "ADV ON" : "ADV OFF";
+                color: advertising ? #3dd68c : #f07178;
+                font-size: 14px;
+                font-weight: 700;
+                vertical-alignment: center;
             }
-        }
-
-        HorizontalBox {
-            spacing: 16px;
+            Text {
+                text: connected ? peer-name : "not connected";
+                color: connected ? #3dd68c : #8aa0b5;
+                font-size: 14px;
+                vertical-alignment: center;
+            }
+            Text {
+                text: battery-pct + "%";
+                color: #e8eef5;
+                font-size: 14px;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; background: transparent; }
             Button {
-                text: "Start Advertising";
+                text: "Advertise";
                 primary: true;
-                clicked => {
-                    root.start-advertise();
-                }
+                clicked => { root.start-advertise(); }
             }
             Button {
                 text: "Stop";
-                clicked => {
-                    root.stop-advertise();
+                clicked => { root.stop-advertise(); }
+            }
+        }
+
+        // —— Mode switch ——
+        HorizontalBox {
+            spacing: 8px;
+            Rectangle {
+                border-radius: 10px;
+                background: !root.km ? #1e3a4f : #1a222c;
+                border-width: 1px;
+                border-color: !root.km ? #5eb0ff : #2a3542;
+                preferred-height: 40px;
+                horizontal-stretch: 1;
+                Text {
+                    width: 100%; height: 100%;
+                    text: "Xbox Controller";
+                    color: #e8eef5;
+                    font-size: 15px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
+                TouchArea {
+                    clicked => {
+                        root.selected-profile = 0;
+                        root.profile-changed(0);
+                        root.clear-mods();
+                    }
+                }
+            }
+            Rectangle {
+                border-radius: 10px;
+                background: root.km ? #1e3a4f : #1a222c;
+                border-width: 1px;
+                border-color: root.km ? #5eb0ff : #2a3542;
+                preferred-height: 40px;
+                horizontal-stretch: 1;
+                Text {
+                    width: 100%; height: 100%;
+                    text: "Keyboard & Mouse";
+                    color: #e8eef5;
+                    font-size: 15px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea {
+                    clicked => {
+                        root.selected-profile = 1;
+                        root.profile-changed(1);
+                    }
+                }
+            }
+        }
+
+        // —— Xbox mode ——
+        if !root.km: VerticalBox {
+            spacing: 10px;
+            Text {
+                text: status-text;
+                color: #8aa0b5;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "Physical Deck controls → Xbox-style BLE gamepad. Disable Steam Input for this app.";
+                color: #8aa0b5;
+                font-size: 14px;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "Paired targets";
+                color: #8aa0b5;
+                font-size: 13px;
+            }
+            Text {
+                text: targets-text;
+                color: #e8eef5;
+                font-size: 14px;
+                wrap: word-wrap;
             }
             Button {
                 text: "Refresh Targets";
-                clicked => {
-                    root.refresh-targets();
-                }
+                clicked => { root.refresh-targets(); }
             }
         }
 
-        Text {
-            text: "Paired targets";
-            color: #8aa0b5;
-            font-size: 16px;
-        }
+        // —— ONE screen: trackpad + keyboard ——
+        if root.km: VerticalBox {
+            spacing: 6px;
+            vertical-stretch: 1;
 
-        Text {
-            text: targets-text;
-            color: #e8eef5;
-            font-size: 16px;
-            wrap: word-wrap;
-        }
+            // Row: trackpad (main) + mouse buttons column
+            HorizontalBox {
+                spacing: 8px;
+                preferred-height: 160px;
 
-        Text {
-            text: "Gaming Mode: disable Steam Input for this shortcut (Properties → Controller), then launch — advertising starts automatically. Host: forget old bond if reconnect fails.";
-            color: #6b7f93;
-            font-size: 14px;
-            wrap: word-wrap;
+                Rectangle {
+                    border-radius: 16px;
+                    background: #151c24;
+                    border-width: 1px;
+                    border-color: #2a3542;
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+
+                    Text {
+                        x: 14px; y: 10px;
+                        text: root.input-ok ? "Trackpad — drag to move" : "Start Advertise to use trackpad & keys";
+                        color: #4a5a6a;
+                        font-size: 13px;
+                    }
+
+                    TouchArea {
+                        property <float> last-x: 0;
+                        property <float> last-y: 0;
+                        property <bool> tracking: false;
+                        enabled: root.input-ok;
+                        moved => {
+                            if self.pressed {
+                                if self.tracking {
+                                    root.mouse-delta(
+                                        (self.mouse-x - self.last-x) * root.pad-sensitivity,
+                                        (self.mouse-y - self.last-y) * root.pad-sensitivity
+                                    );
+                                }
+                                self.last-x = self.mouse-x;
+                                self.last-y = self.mouse-y;
+                                self.tracking = true;
+                            }
+                        }
+                        pressed-changed => {
+                            if !self.pressed {
+                                self.tracking = false;
+                            } else {
+                                self.last-x = self.mouse-x;
+                                self.last-y = self.mouse-y;
+                                self.tracking = true;
+                            }
+                        }
+                    }
+                }
+
+                VerticalBox {
+                    spacing: 6px;
+                    preferred-width: 80px;
+                    MouseBtn { label: "L"; mask: 1; enabled: root.input-ok; pressed-changed(m, d) => { root.mouse-button(m, d); } }
+                    MouseBtn { label: "M"; mask: 4; enabled: root.input-ok; pressed-changed(m, d) => { root.mouse-button(m, d); } }
+                    MouseBtn { label: "R"; mask: 2; enabled: root.input-ok; pressed-changed(m, d) => { root.mouse-button(m, d); } }
+                }
+            }
+
+            // Mods + text + actions
+            HorizontalBox {
+                spacing: 6px;
+                ModCap { label: "Ctrl"; mask: 1; active: (root.sticky-mods & 1) != 0; enabled: root.input-ok; toggled(m) => { root.mod-toggle(m); } }
+                ModCap { label: "Shift"; mask: 2; active: (root.sticky-mods & 2) != 0; enabled: root.input-ok; toggled(m) => { root.mod-toggle(m); } }
+                ModCap { label: "Alt"; mask: 4; active: (root.sticky-mods & 4) != 0; enabled: root.input-ok; toggled(m) => { root.mod-toggle(m); } }
+                ModCap { label: "Win"; mask: 8; active: (root.sticky-mods & 8) != 0; enabled: root.input-ok; toggled(m) => { root.mod-toggle(m); } }
+                LineEdit {
+                    text <=> root.type-buffer;
+                    placeholder-text: "Type to send…";
+                    horizontal-stretch: 1;
+                    enabled: root.input-ok;
+                    edited => { root.type-char(root.type-buffer); }
+                }
+                Button {
+                    text: "Clear mods";
+                    clicked => { root.clear-mods(); }
+                }
+                KeyCap { label: "Esc"; code: 41; accent: true; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "Tab"; code: 43; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "⌫"; code: 42; accent: true; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "Enter"; code: 40; wide: true; accent: true; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+            }
+
+            // F-keys
+            HorizontalBox {
+                spacing: 3px;
+                KeyCap { label: "F1"; code: 58; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "F2"; code: 59; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "F3"; code: 60; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "F4"; code: 61; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "F5"; code: 62; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "F6"; code: 63; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "F7"; code: 64; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "F8"; code: 65; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "F9"; code: 66; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "F10"; code: 67; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "F11"; code: 68; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "F12"; code: 69; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+            }
+
+            HorizontalBox {
+                spacing: 3px;
+                KeyCap { label: "`"; code: 53; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "1"; code: 30; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "2"; code: 31; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "3"; code: 32; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "4"; code: 33; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "5"; code: 34; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "6"; code: 35; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "7"; code: 36; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "8"; code: 37; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "9"; code: 38; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "0"; code: 39; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "-"; code: 45; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "="; code: 46; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+            }
+
+            HorizontalBox {
+                spacing: 3px;
+                KeyCap { label: "Q"; code: 20; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "W"; code: 26; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "E"; code: 8; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "R"; code: 21; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "T"; code: 23; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "Y"; code: 28; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "U"; code: 24; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "I"; code: 12; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "O"; code: 18; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "P"; code: 19; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "["; code: 47; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "]"; code: 48; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "\\"; code: 49; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+            }
+
+            HorizontalBox {
+                spacing: 3px;
+                Rectangle { min-width: 18px; background: transparent; }
+                KeyCap { label: "A"; code: 4; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "S"; code: 22; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "D"; code: 7; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "F"; code: 9; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "G"; code: 10; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "H"; code: 11; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "J"; code: 13; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "K"; code: 14; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "L"; code: 15; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: ";"; code: 51; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "'"; code: 52; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                Rectangle { min-width: 18px; background: transparent; }
+            }
+
+            HorizontalBox {
+                spacing: 3px;
+                Rectangle { min-width: 36px; background: transparent; }
+                KeyCap { label: "Z"; code: 29; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "X"; code: 27; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "C"; code: 6; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "V"; code: 25; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "B"; code: 5; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "N"; code: 17; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "M"; code: 16; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: ","; code: 54; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "."; code: 55; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "/"; code: 56; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                Rectangle { min-width: 36px; background: transparent; }
+            }
+
+            HorizontalBox {
+                spacing: 4px;
+                KeyCap { label: "Ins"; code: 73; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "Home"; code: 74; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "PgUp"; code: 75; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                Rectangle {
+                    border-radius: 8px;
+                    background: #1c2630;
+                    preferred-height: 44px;
+                    horizontal-stretch: 3;
+                    border-width: 1px;
+                    border-color: #2a3542;
+                    Text {
+                        width: 100%; height: 100%;
+                        text: "Space";
+                        color: #e8eef5;
+                        font-size: 15px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        enabled: root.input-ok;
+                        clicked => { root.key-tap(44); }
+                    }
+                }
+                KeyCap { label: "Del"; code: 76; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "End"; code: 77; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "PgDn"; code: 78; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "←"; code: 80; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "↓"; code: 81; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "↑"; code: 82; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "→"; code: 79; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+            }
         }
     }
 }
