@@ -21,13 +21,17 @@ use slint::ComponentHandle;
     about = "Steam Deck as a driverless BLE HOGP gamepad"
 )]
 struct Cli {
-    /// Start without opening the Slint window (headless / CI)
+    /// Start without opening the Slint window (needed under Gaming Mode / gamescope)
     #[arg(long)]
     headless: bool,
 
     /// Begin advertising immediately
     #[arg(long)]
     advertise: bool,
+
+    /// Gaming Mode preset: implies --headless --advertise
+    #[arg(long)]
+    gaming: bool,
 
     /// Profile: gamepad | desktop | flight | racing
     #[arg(long, default_value = "gamepad")]
@@ -56,7 +60,19 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    // Auto-detect Steam Gaming Mode / gamescope if launcher forgot flags
+    let gaming_env = std::env::var_os("DECKLINK_GAMING_MODE").is_some()
+        || std::env::var_os("GAMESCOPE_WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_CURRENT_DESKTOP")
+            .map(|v| v.eq_ignore_ascii_case("games") || v.to_ascii_lowercase().contains("games"))
+            .unwrap_or(false);
+    if cli.gaming || gaming_env {
+        cli.headless = true;
+        cli.advertise = true;
+        info!("Gaming Mode profile: headless + advertise");
+    }
+
     let mut store = ProfileStore::load().context("load config")?;
     if let Some(p) = Profile::parse(&cli.profile) {
         store.set_profile(p);
@@ -87,7 +103,18 @@ async fn main() -> Result<()> {
         return run_headless(shared, &mut input_rx).await;
     }
 
-    run_ui(shared, input_rx)
+    if let Err(e) = run_ui(shared.clone(), input_rx) {
+        warn!("UI failed ({e}); falling back to headless advertise");
+        {
+            let mut g = shared.lock().unwrap();
+            g.store.config.advertise_on_start = true;
+        }
+        // input channel was moved into failed UI path — open a fresh input pump
+        let (input_tx, mut input_rx2) = mpsc::channel::<InputEvent>(256);
+        let _ = spawn_input_task(input_tx).await;
+        return run_headless(shared, &mut input_rx2).await;
+    }
+    Ok(())
 }
 
 async fn ensure_advertising(shared: &Arc<Mutex<Shared>>) -> Result<()> {

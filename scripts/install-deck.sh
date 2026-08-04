@@ -177,9 +177,10 @@ fi
 
 echo
 echo "Done."
-echo "  Launch: ${LAUNCH}"
-echo "  Or from Gaming Mode after adding the Non-Steam shortcut."
-echo "Then: Start Advertising → pair from host Bluetooth settings."
+echo "  Launch (Desktop UI): ${LAUNCH}"
+echo "  Launch (Gaming Mode Steam target): ${HOME}/.local/share/decklink-bt/DeckLink BT"
+echo "Remove any Steam shortcut still named launch.sh, then use 'DeckLink BT'."
+echo "Then: Start Advertising / auto-advertise → pair from host Bluetooth settings."
 echo
 echo "If sudo/udev failed: open Konsole and re-run with a password prompt available."
 echo "If you still see Permission denied on the script itself, run:"

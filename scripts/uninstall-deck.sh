@@ -35,6 +35,10 @@ pkill -f '[d]ecklink-bt' 2>/dev/null || true
 rm -rf "${HOME}/.local/share/decklink-bt"
 rm -f "${HOME}/.local/bin/decklink-bt"
 rm -f "${HOME}/.local/share/applications/decklink-bt.desktop"
+# legacy / steam-named launchers
+rm -f "${HOME}/.local/share/decklink-bt/launch.sh" 2>/dev/null || true
+rm -f "${HOME}/.local/share/decklink-bt/DeckLink BT" 2>/dev/null || true
+rm -f "${HOME}/.local/share/decklink-bt/DeckLink BT.desktop" 2>/dev/null || true
 
 # Config
 rm -rf "${HOME}/.config/decklink-bt"

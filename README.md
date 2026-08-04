@@ -71,14 +71,14 @@ cargo build --release -p decklink-app
 
 ## Gaming Mode checklist (required)
 
-Steam Gaming Mode often looks “connected once in Desktop but dead in Game Mode” unless you do this:
+1. **Remove** any old Steam shortcut named `launch.sh`.
+2. Re-run the installer (or `bash packaging/steam/add-nonsteam-shortcut.sh`) so Steam gets **DeckLink BT**.
+3. **Properties → Controller → Disable Steam Input**.
+4. Launch **DeckLink BT** (headless BLE under gamescope — no UI needed).
+5. On the host: Forget old bond if needed, then pair/connect to **DeckLink BT**.
+6. If it fails in Gaming Mode, in Desktop Mode check: `cat ~/.local/share/decklink-bt/decklink.log`
 
-1. Non-Steam shortcut should point at `~/.local/share/decklink-bt/launch.sh` (installer creates it; always passes `--advertise`).
-2. In Steam: **DeckLink BT → gear → Properties → Controller → Disable Steam Input**.  
-   If Steam Input stays on, Deck controls never reach DeckLink.
-3. Launch **DeckLink BT** from Gaming Mode — wait until status shows Advertising ON.
-4. On the **host**: connect to **DeckLink BT**. If an old Desktop Mode bond is stuck, **Forget** it on the host and pair again while Gaming Mode is advertising.
-5. Disconnect Deck Bluetooth headphones/audio while testing (Steam can hold the radio).
+Desktop Mode: use the **DeckLink BT** app menu entry (UI) for pairing/profiles.
 
 ## Publishing releases (maintainers)
 
