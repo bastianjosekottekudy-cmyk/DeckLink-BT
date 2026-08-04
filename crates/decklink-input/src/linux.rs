@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use decklink_hid::{ControllerState, GamepadButtons};
 
-use crate::{read_battery_percent, InputError, InputEvent};
+use crate::{read_battery_percent, InputCommand, InputError, InputEvent};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DeviceRole {
@@ -150,26 +150,41 @@ fn norm_trigger(value: i32, min: i32, max: i32) -> f32 {
     ((value - min) as f32 / (max - min) as f32).clamp(0.0, 1.0)
 }
 
-/// Open + exclusive grab so Plasma / desktop mouse cannot still see sticks/pads.
-fn open_and_grab(
-    path: &PathBuf,
-    name: &str,
-    role: DeviceRole,
-) -> Result<Device, String> {
-    let mut d = Device::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    // Grab first so the desktop compositor stops receiving stick/trackpad events.
-    d.grab()
-        .map_err(|e| format!("grab {} ({name}) failed: {e}", path.display()))?;
+fn open_device(path: &PathBuf, name: &str, role: DeviceRole) -> Result<Device, String> {
+    let d = Device::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let _ = d.set_nonblocking(true);
     let role_name = match role {
         DeviceRole::Gamepad => "gamepad",
         DeviceRole::Trackpad => "trackpad",
     };
-    info!("grabbed {role_name} {} ({name})", path.display());
+    info!("opened {role_name} {} ({name})", path.display());
     Ok(d)
 }
 
-pub async fn spawn_input_task(tx: mpsc::Sender<InputEvent>) -> Result<(), InputError> {
+fn set_devices_exclusive(opened: &mut [(DeviceRole, String, Device)], exclusive: bool) {
+    for (role, name, dev) in opened.iter_mut() {
+        let role_name = match role {
+            DeviceRole::Gamepad => "gamepad",
+            DeviceRole::Trackpad => "trackpad",
+        };
+        if exclusive {
+            match dev.grab() {
+                Ok(()) => info!("exclusive grab on {role_name} ({name})"),
+                Err(e) => warn!("grab {role_name} ({name}) failed: {e}"),
+            }
+        } else {
+            match dev.ungrab() {
+                Ok(()) => info!("released grab on {role_name} ({name}) — desktop controls restored"),
+                Err(e) => warn!("ungrab {role_name} ({name}) failed: {e}"),
+            }
+        }
+    }
+}
+
+pub async fn spawn_input_task(
+    tx: mpsc::Sender<InputEvent>,
+    mut cmd_rx: mpsc::Receiver<InputCommand>,
+) -> Result<(), InputError> {
     let devices = list_devices();
     for (path, name) in &devices {
         info!(
@@ -199,20 +214,16 @@ pub async fn spawn_input_task(tx: mpsc::Sender<InputEvent>) -> Result<(), InputE
 
     let mut opened: Vec<(DeviceRole, String, Device)> = Vec::new();
     let mut used_paths: HashSet<PathBuf> = HashSet::new();
-    let mut grab_warnings: Vec<String> = Vec::new();
 
-    // Grab every plausible gamepad node (Deck often exposes more than one).
-    // Without exclusive grab, Desktop Mode keeps using sticks as a mouse.
+    // Open without grab — exclusive grab is enabled only while BLE is active
+    // so sticks return to Desktop mouse when disconnected.
     for (_score, path, name) in pads.into_iter().take(3) {
         if !used_paths.insert(path.clone()) {
             continue;
         }
-        match open_and_grab(&path, &name, DeviceRole::Gamepad) {
+        match open_device(&path, &name, DeviceRole::Gamepad) {
             Ok(d) => opened.push((DeviceRole::Gamepad, name, d)),
-            Err(e) => {
-                warn!("{e}");
-                grab_warnings.push(e);
-            }
+            Err(e) => warn!("{e}"),
         }
     }
 
@@ -220,25 +231,14 @@ pub async fn spawn_input_task(tx: mpsc::Sender<InputEvent>) -> Result<(), InputE
         if !used_paths.insert(path.clone()) {
             continue;
         }
-        match open_and_grab(&path, &name, DeviceRole::Trackpad) {
+        match open_device(&path, &name, DeviceRole::Trackpad) {
             Ok(d) => opened.push((DeviceRole::Trackpad, name, d)),
-            Err(e) => {
-                warn!("{e}");
-                grab_warnings.push(e);
-            }
+            Err(e) => warn!("{e}"),
         }
     }
 
     if opened.is_empty() {
         return Err(InputError::NoDevice);
-    }
-
-    if !grab_warnings.is_empty() {
-        let msg = format!(
-            "input grab incomplete — Desktop mouse may still move with sticks. {}",
-            grab_warnings.join("; ")
-        );
-        let _ = tx.send(InputEvent::Error(msg)).await;
     }
 
     // Only the first successfully opened gamepad drives stick/button state.
@@ -249,6 +249,7 @@ pub async fn spawn_input_task(tx: mpsc::Sender<InputEvent>) -> Result<(), InputE
     tokio::spawn(async move {
         let mut state = ControllerState::default();
         let mut abs_min_max: HashMap<(usize, u16), (i32, i32)> = HashMap::new();
+        let mut exclusive = false;
 
         for (idx, (_role, _name, dev)) in opened.iter().enumerate() {
             if let Ok(abs_state) = dev.get_abs_state() {
@@ -262,6 +263,14 @@ pub async fn spawn_input_task(tx: mpsc::Sender<InputEvent>) -> Result<(), InputE
 
         let mut tick: u64 = 0;
         loop {
+            while let Ok(cmd) = cmd_rx.try_recv() {
+                let InputCommand::SetExclusive(want) = cmd;
+                if want != exclusive {
+                    exclusive = want;
+                    set_devices_exclusive(&mut opened, exclusive);
+                }
+            }
+
             state.clear_relative();
             state.battery_pct = read_battery_percent();
             let mut got_event = false;

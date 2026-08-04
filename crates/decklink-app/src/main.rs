@@ -13,7 +13,7 @@ use decklink_hid::{
     hid_from_char, idle_release_packets, KeyModifiers, KeyboardReport, MouseButtons, MouseReport,
     HidPacket, GamepadButtons, MOUSE_REPORT_ID,
 };
-use decklink_input::{spawn_input_task, InputEvent};
+use decklink_input::{spawn_input_task, InputCommand, InputEvent};
 use decklink_profiles::{map_state, PairedTarget, Profile, ProfileStore};
 use decklink_ui::{format_targets, index_from_profile, profile_from_index, MainWindow};
 use slint::ComponentHandle;
@@ -55,6 +55,16 @@ struct Shared {
     type_sent_len: usize,
     /// Select+Start chord was held last frame (edge-trigger profile toggle).
     profile_chord_held: bool,
+    /// Grab sticks/pads only while advertising or connected; release when idle.
+    input_cmd: Option<mpsc::Sender<InputCommand>>,
+}
+
+fn sync_input_grab(shared: &Arc<Mutex<Shared>>) {
+    let g = shared.lock().unwrap();
+    let want = g.advertising || g.connected;
+    if let Some(tx) = &g.input_cmd {
+        let _ = tx.try_send(InputCommand::SetExclusive(want));
+    }
 }
 
 #[tokio::main]
@@ -114,7 +124,8 @@ async fn main() -> Result<()> {
     let _ = store.save();
 
     let (input_tx, mut input_rx) = mpsc::channel::<InputEvent>(256);
-    if let Err(e) = spawn_input_task(input_tx).await {
+    let (input_cmd_tx, input_cmd_rx) = mpsc::channel::<InputCommand>(8);
+    if let Err(e) = spawn_input_task(input_tx, input_cmd_rx).await {
         warn!("input capture: {e} (continuing with idle state)");
     }
 
@@ -124,11 +135,13 @@ async fn main() -> Result<()> {
         advertising: false,
         connected: false,
         peer_name: "—".into(),
-        status: "Ready — Select+Start toggles Xbox / Keyboard+Mouse".into(),
+        status: "Ready — Xbox + Keyboard&Mouse share one Bluetooth link; switch anytime"
+            .into(),
         sticky_mods: 0,
         soft_mouse_buttons: 0,
         type_sent_len: 0,
         profile_chord_held: false,
+        input_cmd: Some(input_cmd_tx),
     }));
 
     if cli.headless {
@@ -145,7 +158,12 @@ async fn main() -> Result<()> {
                 g.status = format!("UI failed ({e}); headless advertising");
             }
             let (input_tx, mut input_rx2) = mpsc::channel::<InputEvent>(256);
-            let _ = spawn_input_task(input_tx).await;
+            let (cmd_tx, cmd_rx) = mpsc::channel::<InputCommand>(8);
+            {
+                let mut g = shared.lock().unwrap();
+                g.input_cmd = Some(cmd_tx);
+            }
+            let _ = spawn_input_task(input_tx, cmd_rx).await;
             run_headless(shared, &mut input_rx2).await
         }
     }
@@ -162,10 +180,14 @@ async fn ensure_advertising(shared: &Arc<Mutex<Shared>>) -> Result<()> {
 
     match start_hogp(name).await {
         Ok(server) => {
-            let mut g = shared.lock().unwrap();
-            g.advertising = true;
-            g.status = "Advertising as BLE gamepad…".into();
-            g.hogp = Some(server);
+            {
+                let mut g = shared.lock().unwrap();
+                g.advertising = true;
+                g.status =
+                    "Advertising — host sees gamepad + keyboard + mouse on one link".into();
+                g.hogp = Some(server);
+            }
+            sync_input_grab(shared);
             info!("HOGP started");
             Ok(())
         }
@@ -178,13 +200,16 @@ async fn ensure_advertising(shared: &Arc<Mutex<Shared>>) -> Result<()> {
 }
 
 async fn stop_advertising(shared: &Arc<Mutex<Shared>>) {
-    let mut g = shared.lock().unwrap();
-    if let Some(h) = g.hogp.take() {
-        h.stop();
+    {
+        let mut g = shared.lock().unwrap();
+        if let Some(h) = g.hogp.take() {
+            h.stop();
+        }
+        g.advertising = false;
+        g.connected = false;
+        g.status = "Stopped — Deck sticks/trackpads returned to Desktop".into();
     }
-    g.advertising = false;
-    g.connected = false;
-    g.status = "Advertising stopped".into();
+    sync_input_grab(shared);
 }
 
 async fn run_headless(
@@ -223,9 +248,7 @@ async fn run_headless(
 }
 
 async fn pump_reports(shared: &Arc<Mutex<Shared>>, state: &decklink_hid::ControllerState) {
-    if maybe_toggle_profile_chord(shared, state).await {
-        // Chord consumed this frame — still map with the new profile below.
-    }
+    let _ = maybe_toggle_profile_chord(shared, state).await;
     let (packets, report_tx) = {
         let g = shared.lock().unwrap();
         let profile = g.store.config.active_profile;
@@ -234,21 +257,8 @@ async fn pump_reports(shared: &Arc<Mutex<Shared>>, state: &decklink_hid::Control
             h.set_battery(mapped.battery_pct);
         }
         let tx = g.hogp.as_ref().map(|h| h.report_tx.clone());
-        let mut packets = mapped.packets;
-        // Keyboard & Mouse: also keep gamepad idle so host sticks stay centered.
-        // Xbox mode: do NOT stream mouse/keyboard idles every tick — that can keep a
-        // host mouse device alive; idles are flushed once on profile switch.
-        if profile == Profile::Desktop {
-            let have: std::collections::HashSet<u8> =
-                packets.iter().map(|p| p.report_id).collect();
-            for idle in idle_release_packets() {
-                if idle.report_id == decklink_hid::GAMEPAD_REPORT_ID && !have.contains(&idle.report_id)
-                {
-                    packets.push(idle);
-                }
-            }
-        }
-        (packets, tx)
+        // Mapper always emits gamepad + mouse + keyboard (IDs 1–3).
+        (mapped.packets, tx)
     };
     if let Some(tx) = report_tx {
         for pkt in packets {
@@ -295,11 +305,14 @@ async fn apply_profile_switch(shared: &Arc<Mutex<Shared>>, to: Option<Profile>) 
         g.sticky_mods = 0;
         g.soft_mouse_buttons = 0;
         g.type_sent_len = 0;
-        g.status = format!("Profile: {next} — Select+Start to toggle");
+        g.status = format!(
+            "Profile: {next} — same Bluetooth link (no re-pair); Select+Start toggles"
+        );
         let _ = g.store.save();
         next
     };
-    info!("profile switch → {next}");
+    info!("profile switch → {next} (no reconnect)");
+    // Neutralize all collections, then the next pump fills the active profile.
     for pkt in idle_release_packets() {
         hogp_send(shared, pkt).await;
     }
@@ -317,7 +330,7 @@ async fn drain_bt_events(shared: &Arc<Mutex<Shared>>) {
             BtEvent::Advertising(on) => {
                 g.advertising = on;
                 g.status = if on {
-                    "Advertising as BLE gamepad…".into()
+                    "Advertising — gamepad + keyboard + mouse on one link".into()
                 } else {
                     "Advertising stopped".into()
                 };
@@ -326,7 +339,7 @@ async fn drain_bt_events(shared: &Arc<Mutex<Shared>>) {
                 g.connected = true;
                 g.peer_name = name.clone();
                 g.status = format!(
-                    "Connected to {name} — move sticks / tap soft keys; if no input, Forget on host and re-pair"
+                    "Connected to {name} — switch Xbox/Keyboard anytime (no re-pair)"
                 );
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -341,13 +354,17 @@ async fn drain_bt_events(shared: &Arc<Mutex<Shared>>) {
             }
             BtEvent::Disconnected { address } => {
                 g.connected = false;
-                g.status = format!("Disconnected ({address})");
+                g.status = format!(
+                    "Disconnected ({address}) — Deck controls returned to Desktop"
+                );
             }
             BtEvent::Error(e) => {
                 g.status = format!("BT error: {e}");
                 error!("{e}");
             }
         }
+        drop(g);
+        sync_input_grab(shared);
     }
 }
 

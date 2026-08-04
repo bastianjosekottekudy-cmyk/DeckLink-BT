@@ -18,6 +18,13 @@ pub enum InputEvent {
     Error(String),
 }
 
+/// Control exclusive device grab from the app (Bluetooth connect/disconnect).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputCommand {
+    /// true = grab sticks/pads away from Desktop mouse; false = release for local use
+    SetExclusive(bool),
+}
+
 /// Shared handle for latest state.
 #[derive(Debug, Default, Clone)]
 pub struct InputHandle {

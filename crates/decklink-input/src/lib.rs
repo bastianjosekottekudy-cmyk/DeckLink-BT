@@ -4,7 +4,7 @@ mod battery;
 mod types;
 
 pub use battery::read_battery_percent;
-pub use types::{InputError, InputEvent, InputHandle};
+pub use types::{InputCommand, InputError, InputEvent, InputHandle};
 
 #[cfg(target_os = "linux")]
 mod linux;

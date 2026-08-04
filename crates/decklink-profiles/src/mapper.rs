@@ -1,6 +1,7 @@
 use decklink_hid::{
-    hid_key, ControllerState, GamepadButtons, HidPacket, KeyModifiers, KeyboardReport,
-    MouseButtons, MouseReport, KEYBOARD_REPORT_ID, MOUSE_REPORT_ID,
+    hid_key, idle_release_packets, ControllerState, GamepadButtons, HidPacket, KeyModifiers,
+    KeyboardReport, MouseButtons, MouseReport, GAMEPAD_REPORT_ID, KEYBOARD_REPORT_ID,
+    MOUSE_REPORT_ID,
 };
 
 use crate::Profile;
@@ -14,23 +15,46 @@ pub struct MappedOutput {
     pub battery_pct: u8,
 }
 
-/// Map live Deck state into one or more HID reports for the active profile.
+/// Map live Deck state into HID reports.
+///
+/// Always emits **gamepad + mouse + keyboard** (report IDs 1–3) so the host keeps
+/// all three collections subscribed on one BLE link. Switching Xbox ↔ Keyboard+Mouse
+/// never requires disconnect/re-pair — only which collection carries live data changes.
 pub fn map_state(profile: Profile, state: &ControllerState) -> MappedOutput {
     let mut out = MappedOutput {
         battery_pct: state.battery_pct,
-        packets: Vec::new(),
+        packets: Vec::with_capacity(3),
     };
 
     match profile {
         Profile::Gamepad => {
             out.packets.push(state.gamepad_packet());
+            // Keep mouse/keyboard endpoints alive (idle) for instant profile switch.
+            out.packets.extend(idle_mouse_keyboard());
         }
         Profile::Desktop => {
+            // Keep gamepad endpoint alive (neutral) while KM is active.
+            out.packets.push(idle_gamepad());
             out.packets.extend(map_keyboard_mouse(state));
         }
     }
 
+    debug_assert_eq!(out.packets.len(), 3);
     out
+}
+
+fn idle_gamepad() -> HidPacket {
+    idle_release_packets()
+        .into_iter()
+        .find(|p| p.report_id == GAMEPAD_REPORT_ID)
+        .expect("idle gamepad")
+}
+
+fn idle_mouse_keyboard() -> Vec<HidPacket> {
+    idle_release_packets()
+        .into_iter()
+        .filter(|p| p.report_id == MOUSE_REPORT_ID || p.report_id == KEYBOARD_REPORT_ID)
+        .collect()
 }
 
 /// Keyboard & Mouse: right trackpad → mouse; buttons/D-pad/left-stick → keys.
@@ -135,26 +159,28 @@ fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use decklink_hid::{idle_release_packets, GAMEPAD_REPORT_ID};
 
     #[test]
-    fn gamepad_emits_one_packet() {
+    fn gamepad_emits_all_three_collections() {
         let s = ControllerState::default();
         let o = map_state(Profile::Gamepad, &s);
-        assert_eq!(o.packets.len(), 1);
+        assert_eq!(o.packets.len(), 3);
         assert_eq!(o.packets[0].report_id, GAMEPAD_REPORT_ID);
+        assert_eq!(o.packets[1].report_id, MOUSE_REPORT_ID);
+        assert_eq!(o.packets[2].report_id, KEYBOARD_REPORT_ID);
     }
 
     #[test]
-    fn keyboard_mouse_emits_mouse_and_keyboard() {
+    fn keyboard_mouse_emits_all_three_collections() {
         let mut s = ControllerState::default();
         s.trackpad_dx = 2.0;
         s.buttons.insert(GamepadButtons::A);
         let o = map_state(Profile::Desktop, &s);
-        assert_eq!(o.packets.len(), 2);
-        assert_eq!(o.packets[0].report_id, MOUSE_REPORT_ID);
-        assert_eq!(o.packets[1].report_id, KEYBOARD_REPORT_ID);
-        assert_eq!(o.packets[1].data[2], hid_key::ENTER);
+        assert_eq!(o.packets.len(), 3);
+        assert_eq!(o.packets[0].report_id, GAMEPAD_REPORT_ID);
+        assert_eq!(o.packets[1].report_id, MOUSE_REPORT_ID);
+        assert_eq!(o.packets[2].report_id, KEYBOARD_REPORT_ID);
+        assert_eq!(o.packets[2].data[2], hid_key::ENTER);
     }
 
     #[test]
@@ -164,7 +190,6 @@ mod tests {
         assert_eq!(pkts[0].report_id, GAMEPAD_REPORT_ID);
         assert_eq!(pkts[1].report_id, MOUSE_REPORT_ID);
         assert_eq!(pkts[2].report_id, KEYBOARD_REPORT_ID);
-        // Neutral gamepad: hat nibble = 8 (center)
         assert_eq!(pkts[0].data[2], 8);
         assert!(pkts[1].data.iter().all(|&b| b == 0));
         assert!(pkts[2].data.iter().all(|&b| b == 0));
