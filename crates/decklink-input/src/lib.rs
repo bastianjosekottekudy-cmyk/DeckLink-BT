@@ -13,6 +13,8 @@ mod linux;
 #[cfg(target_os = "linux")]
 mod lizard;
 #[cfg(target_os = "linux")]
+mod steam_freeze;
+#[cfg(target_os = "linux")]
 pub use linux::spawn_input_task;
 
 #[cfg(not(target_os = "linux"))]

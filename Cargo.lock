@@ -1229,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "decklink-app"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "decklink-bt"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "async-trait",
  "bluer",
@@ -1265,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "decklink-hid"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "bitflags 2.13.1",
  "serde",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "decklink-input"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "bitflags 2.13.1",
  "decklink-hid",
@@ -1288,7 +1288,7 @@ dependencies = [
 
 [[package]]
 name = "decklink-profiles"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "decklink-hid",
  "dirs",
@@ -1300,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "decklink-ui"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "decklink-hid",
  "decklink-profiles",

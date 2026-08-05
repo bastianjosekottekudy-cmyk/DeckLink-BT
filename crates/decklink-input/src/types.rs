@@ -23,6 +23,8 @@ pub enum InputEvent {
 pub enum InputCommand {
     /// true = grab sticks/pads away from Desktop mouse; false = release for local use
     SetExclusive(bool),
+    /// Freeze Steam (SIGSTOP) so stick→mouse cannot reach Desktop. Use only while HID connected.
+    SetSteamFrozen(bool),
 }
 
 /// Shared handle for latest state.

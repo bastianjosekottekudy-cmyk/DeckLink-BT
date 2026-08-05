@@ -248,7 +248,7 @@ export component MainWindow inherits Window {
                 wrap: word-wrap;
             }
             Text {
-                text: "Pair \"DeckLink BT\". Authorize prompts are auto-accepted while advertising. Desktop mouse = right stick / trackpad; sticks should not move the Deck cursor. Hold MENU (⋯) if they still do.";
+                text: "After Connected, Steam freezes so sticks stop moving the Deck cursor. Mouse = Deck right trackpad (or right stick). Prefer physical pad over the on-screen pad.";
                 color: #8aa0b5;
                 font-size: 14px;
                 wrap: word-wrap;
@@ -290,7 +290,7 @@ export component MainWindow inherits Window {
 
                     Text {
                         x: 14px; y: 10px;
-                        text: root.input-ok ? "Trackpad — drag to move" : "Start Advertise to use trackpad & keys";
+                        text: root.input-ok ? "Right trackpad / stick move the PC — small on-screen nudges only" : "Start Advertise to use trackpad & keys";
                         color: #4a5a6a;
                         font-size: 13px;
                     }

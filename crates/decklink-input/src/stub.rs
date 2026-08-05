@@ -17,8 +17,10 @@ pub async fn spawn_input_task(
     tokio::spawn(async move {
         loop {
             while let Ok(cmd) = cmd_rx.try_recv() {
-                let InputCommand::SetExclusive(on) = cmd;
-                info!("stub exclusive grab = {on}");
+                match cmd {
+                    InputCommand::SetExclusive(on) => info!("stub exclusive grab = {on}"),
+                    InputCommand::SetSteamFrozen(on) => info!("stub steam freeze = {on}"),
+                }
             }
             let mut state = ControllerState::default();
             state.battery_pct = read_battery_percent();

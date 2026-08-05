@@ -247,7 +247,7 @@ echo "  Binary: ${LAUNCH}"
 if [[ -x "$LAUNCH" ]]; then
   ls -la "$LAUNCH" | awk '{print "  binary:", $0}'
 fi
-echo "  After open: status bar must say Ready v1.0.2 — if not, install failed."
+echo "  After open: status bar must say Ready v1.0.3 — if not, install failed."
 echo "  On PC: Forget ALL steamdeck + DeckLink BT bonds, then pair DeckLink BT only."
 echo
 echo "If sudo/udev failed: open Konsole and re-run with a password prompt available."

@@ -64,8 +64,11 @@ struct Shared {
 fn sync_input_grab(shared: &Arc<Mutex<Shared>>) {
     let g = shared.lock().unwrap();
     let want = g.advertising || g.connected;
+    // Freeze Steam only while a HID host is live — pairing stays usable.
+    let freeze = g.connected;
     if let Some(tx) = &g.input_cmd {
         let _ = tx.try_send(InputCommand::SetExclusive(want));
+        let _ = tx.try_send(InputCommand::SetSteamFrozen(freeze));
     }
 }
 
@@ -386,7 +389,7 @@ async fn drain_bt_events(shared: &Arc<Mutex<Shared>>) {
                 g.connected = true;
                 g.peer_name = name.clone();
                 g.status = format!(
-                    "Connected to {name} — switch Xbox/Keyboard anytime (no re-pair)"
+                    "Connected to {name} — Steam frozen so sticks go to PC only"
                 );
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -634,45 +637,34 @@ async fn soft_clear_mods(shared: &Arc<Mutex<Shared>>) {
 }
 
 async fn soft_mouse_move(shared: &Arc<Mutex<Shared>>, dx: f32, dy: f32) {
+    // Steam lizard often drags the Deck cursor across this UI widget and injects
+    // huge deltas — that pins the host pointer in a corner. Reject jumps.
+    if !dx.is_finite() || !dy.is_finite() || dx.abs() > 24.0 || dy.abs() > 24.0 {
+        return;
+    }
     let buttons = {
         let g = shared.lock().unwrap();
         g.soft_mouse_buttons
     };
-    let mut rem_x = dx.round() as i32;
-    let mut rem_y = dy.round() as i32;
-    if rem_x == 0 && rem_y == 0 && (dx != 0.0 || dy != 0.0) {
-        rem_x = if dx < 0.0 { -1 } else { 1 };
-        rem_y = if dy < 0.0 {
-            -1
-        } else if dy > 0.0 {
-            1
-        } else {
-            0
-        };
-        if dx == 0.0 {
-            rem_x = 0;
-        }
+    let sx = dx.round().clamp(-12.0, 12.0) as i8;
+    let sy = dy.round().clamp(-12.0, 12.0) as i8;
+    if sx == 0 && sy == 0 {
+        return;
     }
-    while rem_x != 0 || rem_y != 0 {
-        let sx = rem_x.clamp(-127, 127) as i8;
-        let sy = rem_y.clamp(-127, 127) as i8;
-        rem_x -= sx as i32;
-        rem_y -= sy as i32;
-        let r = MouseReport {
-            buttons: MouseButtons::from_bits_truncate(buttons),
-            dx: sx,
-            dy: sy,
-            wheel: 0,
-        };
-        hogp_send(
-            shared,
-            HidPacket {
-                report_id: MOUSE_REPORT_ID,
-                data: r.pack().to_vec(),
-            },
-        )
-        .await;
-    }
+    let r = MouseReport {
+        buttons: MouseButtons::from_bits_truncate(buttons),
+        dx: sx,
+        dy: sy,
+        wheel: 0,
+    };
+    hogp_send(
+        shared,
+        HidPacket {
+            report_id: MOUSE_REPORT_ID,
+            data: r.pack().to_vec(),
+        },
+    )
+    .await;
 }
 
 async fn soft_mouse_button(shared: &Arc<Mutex<Shared>>, mask: u8, down: bool) {

@@ -52,23 +52,28 @@ fn idle_gamepad() -> HidPacket {
         .expect("idle gamepad")
 }
 
-/// Keyboard & Mouse: right stick → mouse; face/D-pad/left-stick → keys.
+/// Keyboard & Mouse: right trackpad (primary) + right stick; face/D-pad/left-stick → keys.
 fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     let mut packets = Vec::new();
 
-    // Right stick only for host mouse (large deadzone). Pad/Steam streams are
-    // too easy to mis-classify and pin the cursor in a corner.
     let mut mx = 0.0f32;
     let mut my = 0.0f32;
-    const STICK_DZ: f32 = 0.40;
-    if state.rx.abs() > STICK_DZ {
-        mx += (state.rx.signum() * (state.rx.abs() - STICK_DZ)) * 10.0;
+    // Physical right pad: already relative deltas from hidraw (never absolute).
+    if state.trackpad_touch {
+        mx += state.trackpad_dx;
+        my += state.trackpad_dy;
+    } else {
+        // Right stick only when pad is not touched (large deadzone).
+        const STICK_DZ: f32 = 0.45;
+        if state.rx.abs() > STICK_DZ {
+            mx += (state.rx.signum() * (state.rx.abs() - STICK_DZ)) * 8.0;
+        }
+        if state.ry.abs() > STICK_DZ {
+            my += (state.ry.signum() * (state.ry.abs() - STICK_DZ)) * 8.0;
+        }
     }
-    if state.ry.abs() > STICK_DZ {
-        my += (state.ry.signum() * (state.ry.abs() - STICK_DZ)) * 10.0;
-    }
-    let dx = mx.round().clamp(-16.0, 16.0) as i8;
-    let dy = my.round().clamp(-16.0, 16.0) as i8;
+    let dx = mx.round().clamp(-12.0, 12.0) as i8;
+    let dy = my.round().clamp(-12.0, 12.0) as i8;
     let mut buttons = MouseButtons::empty();
     if state.rt > 0.4 || state.trackpad_click {
         buttons |= MouseButtons::LEFT;
@@ -192,6 +197,22 @@ mod tests {
             .any(|p| p.report_id == KEYBOARD_REPORT_ID
                 && p.data.get(2) == Some(&hid_key::ENTER)));
         assert!(o.packets.iter().any(|p| p.report_id == MOUSE_REPORT_ID));
+    }
+
+    #[test]
+    fn trackpad_touch_drives_mouse() {
+        let mut s = ControllerState::default();
+        s.trackpad_touch = true;
+        s.trackpad_dx = 4.0;
+        s.trackpad_dy = -3.0;
+        let o = map_state(Profile::Desktop, &s);
+        let mouse = o
+            .packets
+            .iter()
+            .find(|p| p.report_id == MOUSE_REPORT_ID)
+            .expect("mouse packet");
+        assert_eq!(mouse.data[1], 4u8);
+        assert_eq!(mouse.data[2] as i8, -3);
     }
 
     #[test]

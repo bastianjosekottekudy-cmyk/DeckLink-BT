@@ -333,25 +333,29 @@ async fn run_hidraw_loop(
 
     loop {
         while let Ok(cmd) = cmd_rx.try_recv() {
-            let InputCommand::SetExclusive(want) = cmd;
-            if want != exclusive {
-                exclusive = want;
-                if exclusive {
-                    // Fresh open once when advertising starts, then keep grabs held.
-                    silence = open_silence_devices();
-                    set_silence_exclusive(&mut silence, true, false);
-                    deck.feed_lizard();
-                    hidraw_deck::set_kernel_lizard_mode(false);
-                    // Do not SIGSTOP Steam here — it freezes Desktop Mode and
-                    // pairing feels "dead". Grabs + lizard + hidraw are enough.
-                    info!(
-                        "local pointer silence ON ({} devices) — grabs held",
-                        silence.len()
-                    );
-                } else {
-                    set_silence_exclusive(&mut silence, false, false);
-                    hidraw_deck::set_kernel_lizard_mode(true);
-                    info!("local pointer silence OFF");
+            match cmd {
+                InputCommand::SetExclusive(want) => {
+                    if want != exclusive {
+                        exclusive = want;
+                        if exclusive {
+                            silence = open_silence_devices();
+                            set_silence_exclusive(&mut silence, true, false);
+                            deck.feed_lizard();
+                            hidraw_deck::set_kernel_lizard_mode(false);
+                            info!(
+                                "local pointer silence ON ({} devices) — grabs held",
+                                silence.len()
+                            );
+                        } else {
+                            set_silence_exclusive(&mut silence, false, false);
+                            hidraw_deck::set_kernel_lizard_mode(true);
+                            crate::steam_freeze::set_steam_frozen(false);
+                            info!("local pointer silence OFF");
+                        }
+                    }
+                }
+                InputCommand::SetSteamFrozen(freeze) => {
+                    crate::steam_freeze::set_steam_frozen(freeze);
                 }
             }
         }
@@ -472,23 +476,31 @@ async fn spawn_evdev_fallback(
 
         loop {
             while let Ok(cmd) = cmd_rx.try_recv() {
-                let InputCommand::SetExclusive(want) = cmd;
-                if want != exclusive {
-                    exclusive = want;
-                    for (role, name, dev) in opened.iter_mut() {
-                        if exclusive {
-                            if let Err(e) = dev.grab() {
-                                warn!("grab {} ({name}): {e}", role_name(*role));
-                            } else {
-                                info!("exclusive grab on {} ({name})", role_name(*role));
+                match cmd {
+                    InputCommand::SetExclusive(want) => {
+                        if want != exclusive {
+                            exclusive = want;
+                            for (role, name, dev) in opened.iter_mut() {
+                                if exclusive {
+                                    if let Err(e) = dev.grab() {
+                                        warn!("grab {} ({name}): {e}", role_name(*role));
+                                    } else {
+                                        info!("exclusive grab on {} ({name})", role_name(*role));
+                                    }
+                                } else if let Err(e) = dev.ungrab() {
+                                    warn!("ungrab {} ({name}): {e}", role_name(*role));
+                                }
                             }
-                        } else if let Err(e) = dev.ungrab() {
-                            warn!("ungrab {} ({name}): {e}", role_name(*role));
+                            hidraw_deck::set_kernel_lizard_mode(!exclusive);
+                            if exclusive {
+                                let _ = crate::lizard::open_and_disable();
+                            } else {
+                                crate::steam_freeze::set_steam_frozen(false);
+                            }
                         }
                     }
-                    hidraw_deck::set_kernel_lizard_mode(!exclusive);
-                    if exclusive {
-                        let _ = crate::lizard::open_and_disable();
+                    InputCommand::SetSteamFrozen(freeze) => {
+                        crate::steam_freeze::set_steam_frozen(freeze);
                     }
                 }
             }
