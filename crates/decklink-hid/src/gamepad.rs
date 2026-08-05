@@ -8,21 +8,23 @@ pub const GAMEPAD_REPORT_LEN: usize = 13;
 bitflags! {
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
     pub struct GamepadButtons: u16 {
+        // Xbox / XInput order (Button 1..11) — do not insert paddles before GUIDE.
         const A      = 1 << 0;
         const B      = 1 << 1;
         const X      = 1 << 2;
         const Y      = 1 << 3;
-        const L1     = 1 << 4;
-        const R1     = 1 << 5;
-        const SELECT = 1 << 6;
-        const START  = 1 << 7;
+        const L1     = 1 << 4; // LB
+        const R1     = 1 << 5; // RB
+        const SELECT = 1 << 6; // Back / View
+        const START  = 1 << 7; // Start / Menu
         const L3     = 1 << 8;
         const R3     = 1 << 9;
-        const L4     = 1 << 10;
-        const R4     = 1 << 11;
-        const L5     = 1 << 12;
-        const R5     = 1 << 13;
-        const GUIDE  = 1 << 14;
+        const GUIDE  = 1 << 10; // Guide / Steam
+        // Deck extras (ignored by most Xbox mappings)
+        const L4     = 1 << 11;
+        const R4     = 1 << 12;
+        const L5     = 1 << 13;
+        const R5     = 1 << 14;
         const TOUCH  = 1 << 15;
     }
 }

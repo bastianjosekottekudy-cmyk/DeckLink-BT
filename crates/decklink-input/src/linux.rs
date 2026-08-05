@@ -136,8 +136,8 @@ fn apply_key(state: &mut ControllerState, code: KeyCode, pressed: bool) {
     let flag = match code {
         KeyCode::BTN_SOUTH => Some(GamepadButtons::A),
         KeyCode::BTN_EAST => Some(GamepadButtons::B),
-        KeyCode::BTN_NORTH => Some(GamepadButtons::X),
-        KeyCode::BTN_WEST => Some(GamepadButtons::Y),
+        KeyCode::BTN_WEST => Some(GamepadButtons::X),
+        KeyCode::BTN_NORTH => Some(GamepadButtons::Y),
         KeyCode::BTN_TL => Some(GamepadButtons::L1),
         KeyCode::BTN_TR => Some(GamepadButtons::R1),
         KeyCode::BTN_SELECT => Some(GamepadButtons::SELECT),

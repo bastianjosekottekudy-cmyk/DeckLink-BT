@@ -1,10 +1,17 @@
 //! Freeze Steam while a HID host is connected so Desktop stick→mouse cannot fight us.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tracing::info;
 
+static FROZEN: AtomicBool = AtomicBool::new(false);
+
 /// SIGSTOP / SIGCONT Steam processes (SteamOS Desktop Mode).
-/// Call only after HID Connected — freezing during advertise makes pairing feel dead.
+/// No-ops when the requested state matches the last applied state (avoids spam).
 pub fn set_steam_frozen(freeze: bool) {
+    if FROZEN.swap(freeze, Ordering::SeqCst) == freeze {
+        return;
+    }
     let arg = if freeze { "-STOP" } else { "-CONT" };
     let mut any = false;
     for name in ["steamwebhelper", "steam"] {
@@ -26,5 +33,7 @@ pub fn set_steam_frozen(freeze: bool) {
                 "resumed (SIGCONT)"
             }
         );
+    } else if !freeze {
+        // Still record unfrozen even if killall found nothing.
     }
 }

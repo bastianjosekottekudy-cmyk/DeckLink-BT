@@ -217,91 +217,119 @@ fn apply_deck_report(
     state: &mut ControllerState,
     pad_last: &mut (Option<i32>, Option<i32>),
 ) {
-    let b8 = data[8];
-    let b9 = data[9];
-    let b10 = data[10];
-    let b11 = data[11];
-    let b13 = data[13];
-    let b14 = data[14];
+    // Buttons are a little-endian u64 at offset 8 (SDL / hid-steam layout).
+    let buttons_raw = u64::from_le_bytes([
+        data.get(8).copied().unwrap_or(0),
+        data.get(9).copied().unwrap_or(0),
+        data.get(10).copied().unwrap_or(0),
+        data.get(11).copied().unwrap_or(0),
+        data.get(12).copied().unwrap_or(0),
+        data.get(13).copied().unwrap_or(0),
+        data.get(14).copied().unwrap_or(0),
+        data.get(15).copied().unwrap_or(0),
+    ]);
+
+    // Low-word bits (SDL STEAMDECK_LBUTTON_*)
+    const A: u64 = 1 << 7;
+    const B: u64 = 1 << 5;
+    const X: u64 = 1 << 6;
+    const Y: u64 = 1 << 4;
+    const LB: u64 = 1 << 3;
+    const RB: u64 = 1 << 2;
+    const LT_FULL: u64 = 1 << 1;
+    const RT_FULL: u64 = 1 << 0;
+    const DPAD_UP: u64 = 1 << 8;
+    const DPAD_RIGHT: u64 = 1 << 9;
+    const DPAD_LEFT: u64 = 1 << 10;
+    const DPAD_DOWN: u64 = 1 << 11;
+    const VIEW: u64 = 1 << 12; // Select / Back
+    const STEAM: u64 = 1 << 13; // Guide
+    const MENU: u64 = 1 << 14; // Start
+    const L5: u64 = 1 << 15;
+    const R5: u64 = 1 << 16;
+    const RPAD_CLICK: u64 = 1 << 18;
+    const RPAD_TOUCH: u64 = 1 << 20;
+    const L3: u64 = 1 << 22;
+    const R3: u64 = 1 << 26;
+    // High-word bits live in the upper 32 bits of the same u64
+    const L4: u64 = 1 << (32 + 9);
+    const R4: u64 = 1 << (32 + 10);
+    const QAM: u64 = 1 << (32 + 18);
 
     let mut buttons = GamepadButtons::empty();
-    if b8 & (1 << 7) != 0 {
+    if buttons_raw & A != 0 {
         buttons |= GamepadButtons::A;
     }
-    if b8 & (1 << 5) != 0 {
+    if buttons_raw & B != 0 {
         buttons |= GamepadButtons::B;
     }
-    if b8 & (1 << 6) != 0 {
+    if buttons_raw & X != 0 {
         buttons |= GamepadButtons::X;
     }
-    if b8 & (1 << 4) != 0 {
+    if buttons_raw & Y != 0 {
         buttons |= GamepadButtons::Y;
     }
-    if b8 & (1 << 3) != 0 {
+    if buttons_raw & LB != 0 {
         buttons |= GamepadButtons::L1;
     }
-    if b8 & (1 << 2) != 0 {
+    if buttons_raw & RB != 0 {
         buttons |= GamepadButtons::R1;
     }
-    if b9 & (1 << 4) != 0 {
+    if buttons_raw & VIEW != 0 {
         buttons |= GamepadButtons::SELECT;
     }
-    if b9 & (1 << 6) != 0 {
+    if buttons_raw & MENU != 0 {
         buttons |= GamepadButtons::START;
     }
-    if b9 & (1 << 5) != 0 {
+    if buttons_raw & (STEAM | QAM) != 0 {
         buttons |= GamepadButtons::GUIDE;
     }
-    if b10 & (1 << 6) != 0 {
+    if buttons_raw & L3 != 0 {
         buttons |= GamepadButtons::L3;
     }
-    if b11 & (1 << 2) != 0 {
+    if buttons_raw & R3 != 0 {
         buttons |= GamepadButtons::R3;
     }
-    if b13 & (1 << 1) != 0 {
+    if buttons_raw & L4 != 0 {
         buttons |= GamepadButtons::L4;
     }
-    if b13 & (1 << 2) != 0 {
+    if buttons_raw & R4 != 0 {
         buttons |= GamepadButtons::R4;
     }
-    if b9 & (1 << 7) != 0 {
+    if buttons_raw & L5 != 0 {
         buttons |= GamepadButtons::L5;
     }
-    if b10 & (1 << 0) != 0 {
+    if buttons_raw & R5 != 0 {
         buttons |= GamepadButtons::R5;
-    }
-    if b14 & (1 << 2) != 0 {
-        // QAM / base — treat as guide alias if needed; keep as GUIDE extra via BASE unused
     }
     state.buttons = buttons;
 
-    state.dpad_up = b9 & (1 << 0) != 0;
-    state.dpad_right = b9 & (1 << 1) != 0;
-    state.dpad_left = b9 & (1 << 2) != 0;
-    state.dpad_down = b9 & (1 << 3) != 0;
+    state.dpad_up = buttons_raw & DPAD_UP != 0;
+    state.dpad_right = buttons_raw & DPAD_RIGHT != 0;
+    state.dpad_left = buttons_raw & DPAD_LEFT != 0;
+    state.dpad_down = buttons_raw & DPAD_DOWN != 0;
 
+    // Sticks: Deck reports match Xbox HID (Y up = negative after negate).
     state.lx = norm_stick(i16_le(data, 48));
     state.ly = norm_stick(-i16_le(data, 50));
     state.rx = norm_stick(i16_le(data, 52));
     state.ry = norm_stick(-i16_le(data, 54));
 
-    // Analog triggers (kernel maps these as ABS_HAT2Y / ABS_HAT2X).
     state.lt = norm_trigger(u16_le(data, 44));
     state.rt = norm_trigger(u16_le(data, 46));
-    // Digital full-pull bits
-    if b8 & (1 << 1) != 0 {
+    if buttons_raw & LT_FULL != 0 {
         state.lt = state.lt.max(1.0);
     }
-    if b8 & (1 << 0) != 0 {
+    if buttons_raw & RT_FULL != 0 {
         state.rt = state.rt.max(1.0);
     }
 
-    let rpad_touched = b10 & (1 << 4) != 0;
-    let rpad_click = b10 & (1 << 2) != 0;
+    let rpad_touched = buttons_raw & RPAD_TOUCH != 0;
+    let rpad_click = buttons_raw & RPAD_CLICK != 0;
     state.trackpad_touch = rpad_touched;
     state.trackpad_click = rpad_click;
 
-    // Right pad → relative mouse deltas only while touched (never absolute dumps).
+    // Right pad → relative mouse (never absolute). Invert Y for screen coords.
     state.trackpad_dx = 0.0;
     state.trackpad_dy = 0.0;
     if rpad_touched {
@@ -309,10 +337,10 @@ fn apply_deck_report(
         let y = i16_le(data, 22) as i32;
         if let (Some(px), Some(py)) = *pad_last {
             let dx = (x - px) as f32;
-            let dy = (y - py) as f32;
-            if dx.abs() < 500.0 && dy.abs() < 500.0 {
-                state.trackpad_dx = (dx * 0.04).clamp(-12.0, 12.0);
-                state.trackpad_dy = (dy * 0.04).clamp(-12.0, 12.0);
+            let dy = (py - y) as f32; // finger up → cursor up
+            if dx.abs() < 800.0 && dy.abs() < 800.0 {
+                state.trackpad_dx = (dx * 0.06).clamp(-20.0, 20.0);
+                state.trackpad_dy = (dy * 0.06).clamp(-20.0, 20.0);
             }
         }
         *pad_last = (Some(x), Some(y));

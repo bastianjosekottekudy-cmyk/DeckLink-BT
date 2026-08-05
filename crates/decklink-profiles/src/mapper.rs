@@ -72,8 +72,8 @@ fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
             my += (state.ry.signum() * (state.ry.abs() - STICK_DZ)) * 8.0;
         }
     }
-    let dx = mx.round().clamp(-12.0, 12.0) as i8;
-    let dy = my.round().clamp(-12.0, 12.0) as i8;
+    let dx = mx.round().clamp(-20.0, 20.0) as i8;
+    let dy = my.round().clamp(-20.0, 20.0) as i8;
     let mut buttons = MouseButtons::empty();
     if state.rt > 0.4 || state.trackpad_click {
         buttons |= MouseButtons::LEFT;

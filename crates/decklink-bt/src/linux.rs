@@ -504,7 +504,7 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
 
     let le_adv = Advertisement {
         advertisement_type: AdvType::Peripheral,
-        service_uuids: uuids,
+        service_uuids: uuids.clone(),
         discoverable: Some(true),
         local_name: Some(device_name.clone()),
         appearance: Some(APPEARANCE_GAMEPAD),
@@ -515,9 +515,42 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
         .advertise(le_adv)
         .await
         .map_err(|e| BtError::Message(format!("advertise failed: {e}")))?;
+    let adv_slot: Arc<Mutex<Option<_>>> = Arc::new(Mutex::new(Some(adv_handle)));
 
     let _ = event_tx.send(BtEvent::Advertising(true)).await;
     info!("HOGP advertising as '{}'", device_name);
+
+    let restart_adv = {
+        let adapter = adapter.clone();
+        let adv_slot = adv_slot.clone();
+        let device_name = device_name.clone();
+        let uuids = uuids.clone();
+        Arc::new(move || {
+            let adapter = adapter.clone();
+            let adv_slot = adv_slot.clone();
+            let device_name = device_name.clone();
+            let uuids = uuids.clone();
+            async move {
+                let mut slot = adv_slot.lock().await;
+                *slot = None;
+                let le_adv = Advertisement {
+                    advertisement_type: AdvType::Peripheral,
+                    service_uuids: uuids,
+                    discoverable: Some(true),
+                    local_name: Some(device_name),
+                    appearance: Some(APPEARANCE_GAMEPAD),
+                    ..Default::default()
+                };
+                match adapter.advertise(le_adv).await {
+                    Ok(h) => {
+                        *slot = Some(h);
+                        info!("LE advertising restarted (ready for reconnect)");
+                    }
+                    Err(e) => warn!("restart advertise failed: {e}"),
+                }
+            }
+        })
+    };
 
     let mut device_events = adapter
         .events()
@@ -544,36 +577,70 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                                 .ok()
                                 .flatten()
                                 .unwrap_or_else(|| addr.to_string());
-                            // Pairing + Windows HID stack often takes >5s after ACL up.
                             let n1c = n1c.clone();
                             let n2c = n2c.clone();
                             let n3c = n3c.clone();
                             let announced_watch = announced_watch.clone();
+                            let event_tx2 = event_tx2.clone();
                             let addr_s = addr.to_string();
+                            let restart_adv = restart_adv.clone();
+                            let adapter_watch = adapter2.clone();
                             tokio::spawn(async move {
-                                for i in 0..120 {
+                                // Wait for HID CCCDs (pairing can take a while).
+                                let mut got_hid = false;
+                                for i in 0..60 {
                                     if announced_watch.load(Ordering::SeqCst) {
-                                        return;
+                                        got_hid = true;
+                                        break;
                                     }
                                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                                     let c1 = n1c.lock().await.len();
                                     let c2 = n2c.lock().await.len();
                                     let c3 = n3c.lock().await.len();
                                     if c1 + c2 + c3 > 0 {
-                                        // announce_hid_host runs from notifier reg path
                                         info!(
                                             "peer {name} ({addr_s}) HID CCCDs up after ~{}ms \
                                              (gamepad={c1} mouse={c2} keyboard={c3})",
                                             (i + 1) * 500
                                         );
-                                        return;
+                                        got_hid = true;
+                                        break;
                                     }
                                 }
-                                if !announced_watch.load(Ordering::SeqCst) {
+                                if !got_hid && !announced_watch.load(Ordering::SeqCst) {
                                     warn!(
-                                        "BT peer {name} ({addr_s}) connected 60s with no HID \
-                                         notify — forget device on PC and re-pair DeckLink BT"
+                                        "BT peer {name} ({addr_s}) connected without HID — \
+                                         disconnecting so Windows can reconnect cleanly"
                                     );
+                                    if let Ok(d) = adapter_watch.device(addr) {
+                                        let _ = d.disconnect().await;
+                                    }
+                                    announced_watch.store(false, Ordering::SeqCst);
+                                    restart_adv().await;
+                                    return;
+                                }
+
+                                // Watch for host disconnect → re-advertise (no re-pair).
+                                loop {
+                                    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                                    let connected = match adapter_watch.device(addr) {
+                                        Ok(d) => matches!(d.is_connected().await, Ok(true)),
+                                        Err(_) => false,
+                                    };
+                                    if !connected {
+                                        info!(
+                                            "host {name} ({addr_s}) disconnected — \
+                                             re-advertising for next connect"
+                                        );
+                                        announced_watch.store(false, Ordering::SeqCst);
+                                        let _ = event_tx2
+                                            .send(BtEvent::Disconnected {
+                                                address: addr_s.clone(),
+                                            })
+                                            .await;
+                                        restart_adv().await;
+                                        break;
+                                    }
                                 }
                             });
                         }
@@ -585,7 +652,6 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                             address: addr.to_string(),
                         })
                         .await;
-                    // Allow a fresh Connected when the next host enables CCCDs.
                     let mut any_connected = false;
                     if let Ok(addrs) = adapter2.device_addresses().await {
                         for a in addrs {
@@ -599,6 +665,7 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                     }
                     if !any_connected {
                         announced_watch.store(false, Ordering::SeqCst);
+                        restart_adv().await;
                     }
                 }
                 _ => {}
@@ -640,8 +707,8 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
     });
 
     let adapter_restore = adapter.clone();
+    let adv_slot_stop = adv_slot.clone();
     tokio::spawn(async move {
-        // Keep agent registered until stop (dropping unregisters it).
         let _agent_handle = agent_handle;
         loop {
             if stop_rx.changed().await.is_err() {
@@ -649,18 +716,15 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
             }
             if *stop_rx.borrow() {
                 info!("stopping HOGP server");
-                drop(adv_handle);
+                *adv_slot_stop.lock().await = None;
                 drop(app_handle);
-                // Leave alias as DeckLink BT so the host does not grow a second
-                // "steamdeck" identity. Only restore if we changed it this session.
                 if previous_alias != device_name
                     && !previous_alias.is_empty()
                     && previous_alias.to_ascii_lowercase() != "decklink bt"
                 {
-                    // Keep DeckLink BT — intentional (see comment above).
                     info!("leaving adapter alias as '{device_name}' (was '{previous_alias}')");
                 }
-                let _ = adapter_restore; // silence unused if alias kept
+                let _ = adapter_restore;
                 let _ = event_tx.send(BtEvent::Advertising(false)).await;
                 break;
             }

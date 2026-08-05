@@ -248,7 +248,7 @@ export component MainWindow inherits Window {
                 wrap: word-wrap;
             }
             Text {
-                text: "After Connected, Steam freezes so sticks stop moving the Deck cursor. Mouse = Deck right trackpad (or right stick). Prefer physical pad over the on-screen pad.";
+                text: "Leave Advertise ON for reconnects (do not Stop between sessions). Mouse = Deck right trackpad. Xbox mapping matches A/B/X/Y/LB/RB/Back/Start/Guide.";
                 color: #8aa0b5;
                 font-size: 14px;
                 wrap: word-wrap;
@@ -290,41 +290,15 @@ export component MainWindow inherits Window {
 
                     Text {
                         x: 14px; y: 10px;
-                        text: root.input-ok ? "Right trackpad / stick move the PC — small on-screen nudges only" : "Start Advertise to use trackpad & keys";
-                        color: #4a5a6a;
-                        font-size: 13px;
-                    }
-
-                    TouchArea {
-                        property <float> last-x: 0;
-                        property <float> last-y: 0;
-                        property <bool> tracking: false;
-                        enabled: root.input-ok;
-                        moved => {
-                            if self.pressed {
-                                if self.tracking {
-                                    root.mouse-delta(
-                                        (self.mouse-x / 1px - self.last-x) * root.pad-sensitivity,
-                                        (self.mouse-y / 1px - self.last-y) * root.pad-sensitivity
-                                    );
-                                }
-                                self.last-x = self.mouse-x / 1px;
-                                self.last-y = self.mouse-y / 1px;
-                                self.tracking = true;
-                            } else {
-                                self.tracking = false;
-                            }
-                        }
-                        pointer-event(event) => {
-                            if event.kind == PointerEventKind.down {
-                                self.last-x = self.mouse-x / 1px;
-                                self.last-y = self.mouse-y / 1px;
-                                self.tracking = true;
-                            }
-                            if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
-                                self.tracking = false;
-                            }
-                        }
+                        width: parent.width - 28px;
+                        height: parent.height - 20px;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                        text: root.input-ok
+                            ? "Use the Deck RIGHT trackpad (or right stick) to move the PC mouse.\nOn-screen pad disabled — it was slamming the cursor."
+                            : "Start Advertise, then pair on the PC.";
+                        color: #8a9aaa;
+                        font-size: 14px;
                     }
                 }
 
