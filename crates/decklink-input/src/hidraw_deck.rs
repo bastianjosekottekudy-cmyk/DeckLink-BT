@@ -24,7 +24,8 @@ pub struct HidrawDeck {
     path: PathBuf,
     /// Kept so lizard disable stays applied / watchdog can feed.
     lizard: Option<LizardGuard>,
-    pad_last: (Option<i32>, Option<i32>),
+    /// Last absolute sample per pad: (left, right).
+    pad_last: (Option<(i32, i32)>, Option<(i32, i32)>),
 }
 
 fn parse_hid_id(uevent: &str) -> Option<(u16, u16)> {
@@ -215,7 +216,7 @@ impl HidrawDeck {
 fn apply_deck_report(
     data: &[u8],
     state: &mut ControllerState,
-    pad_last: &mut (Option<i32>, Option<i32>),
+    pad_last: &mut (Option<(i32, i32)>, Option<(i32, i32)>),
 ) {
     // Buttons are a little-endian u64 at offset 8 (SDL / hid-steam layout).
     let buttons_raw = u64::from_le_bytes([
@@ -242,16 +243,17 @@ fn apply_deck_report(
     const DPAD_RIGHT: u64 = 1 << 9;
     const DPAD_LEFT: u64 = 1 << 10;
     const DPAD_DOWN: u64 = 1 << 11;
-    const VIEW: u64 = 1 << 12; // Select / Back
-    const STEAM: u64 = 1 << 13; // Guide
-    const MENU: u64 = 1 << 14; // Start
+    const VIEW: u64 = 1 << 12;
+    const STEAM: u64 = 1 << 13;
+    const MENU: u64 = 1 << 14;
     const L5: u64 = 1 << 15;
     const R5: u64 = 1 << 16;
+    const LPAD_CLICK: u64 = 1 << 17;
     const RPAD_CLICK: u64 = 1 << 18;
+    const LPAD_TOUCH: u64 = 1 << 19;
     const RPAD_TOUCH: u64 = 1 << 20;
     const L3: u64 = 1 << 22;
     const R3: u64 = 1 << 26;
-    // High-word bits live in the upper 32 bits of the same u64
     const L4: u64 = 1 << (32 + 9);
     const R4: u64 = 1 << (32 + 10);
     const QAM: u64 = 1 << (32 + 18);
@@ -309,7 +311,6 @@ fn apply_deck_report(
     state.dpad_left = buttons_raw & DPAD_LEFT != 0;
     state.dpad_down = buttons_raw & DPAD_DOWN != 0;
 
-    // Sticks: Deck reports match Xbox HID (Y up = negative after negate).
     state.lx = norm_stick(i16_le(data, 48));
     state.ly = norm_stick(-i16_le(data, 50));
     state.rx = norm_stick(i16_le(data, 52));
@@ -324,27 +325,45 @@ fn apply_deck_report(
         state.rt = state.rt.max(1.0);
     }
 
-    let rpad_touched = buttons_raw & RPAD_TOUCH != 0;
-    let rpad_click = buttons_raw & RPAD_CLICK != 0;
-    state.trackpad_touch = rpad_touched;
-    state.trackpad_click = rpad_click;
+    state.lpad_touch = buttons_raw & LPAD_TOUCH != 0;
+    state.rpad_touch = buttons_raw & RPAD_TOUCH != 0;
+    state.lpad_click = buttons_raw & LPAD_CLICK != 0;
+    state.rpad_click = buttons_raw & RPAD_CLICK != 0;
 
-    // Right pad → relative mouse (never absolute). Invert Y for screen coords.
-    state.trackpad_dx = 0.0;
-    state.trackpad_dy = 0.0;
-    if rpad_touched {
-        let x = i16_le(data, 20) as i32;
-        let y = i16_le(data, 22) as i32;
-        if let (Some(px), Some(py)) = *pad_last {
+    state.lpad_dx = 0.0;
+    state.lpad_dy = 0.0;
+    state.rpad_dx = 0.0;
+    state.rpad_dy = 0.0;
+
+    if state.lpad_touch {
+        let x = i16_le(data, 16) as i32;
+        let y = i16_le(data, 18) as i32;
+        if let Some((px, py)) = pad_last.0 {
             let dx = (x - px) as f32;
-            let dy = (py - y) as f32; // finger up → cursor up
+            let dy = (py - y) as f32;
             if dx.abs() < 800.0 && dy.abs() < 800.0 {
-                state.trackpad_dx = (dx * 0.06).clamp(-20.0, 20.0);
-                state.trackpad_dy = (dy * 0.06).clamp(-20.0, 20.0);
+                state.lpad_dx = (dx * 0.06).clamp(-20.0, 20.0);
+                state.lpad_dy = (dy * 0.06).clamp(-20.0, 20.0);
             }
         }
-        *pad_last = (Some(x), Some(y));
+        pad_last.0 = Some((x, y));
     } else {
-        *pad_last = (None, None);
+        pad_last.0 = None;
+    }
+
+    if state.rpad_touch {
+        let x = i16_le(data, 20) as i32;
+        let y = i16_le(data, 22) as i32;
+        if let Some((px, py)) = pad_last.1 {
+            let dx = (x - px) as f32;
+            let dy = (py - y) as f32;
+            if dx.abs() < 800.0 && dy.abs() < 800.0 {
+                state.rpad_dx = (dx * 0.06).clamp(-20.0, 20.0);
+                state.rpad_dy = (dy * 0.06).clamp(-20.0, 20.0);
+            }
+        }
+        pad_last.1 = Some((x, y));
+    } else {
+        pad_last.1 = None;
     }
 }

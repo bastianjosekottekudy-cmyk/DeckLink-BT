@@ -183,9 +183,9 @@ fn apply_key(state: &mut ControllerState, code: KeyCode, pressed: bool) {
         KeyCode::BTN_TRIGGER_HAPPY4 => Some(GamepadButtons::R5),
         KeyCode::BTN_LEFT | KeyCode::BTN_TOOL_FINGER | KeyCode::BTN_TOUCH => {
             if matches!(code, KeyCode::BTN_LEFT) {
-                state.trackpad_click = pressed;
+                state.rpad_click = pressed;
             } else {
-                state.trackpad_touch = pressed;
+                state.rpad_touch = pressed;
             }
             None
         }
@@ -578,7 +578,7 @@ async fn spawn_evdev_fallback(
                         EventSummary::AbsoluteAxis(_, axis, value)
                             if *role == DeviceRole::Trackpad && !pad_saw_rel =>
                         {
-                            if !state.trackpad_touch {
+                            if !state.rpad_touch {
                                 continue;
                             }
                             let entry = pad_last.entry(idx).or_insert((None, None));
@@ -587,7 +587,7 @@ async fn spawn_evdev_fallback(
                                     if let Some(prev) = entry.0 {
                                         let d = (value - prev) as f32;
                                         if d.abs() < 400.0 {
-                                            state.trackpad_dx += (d * 0.05).clamp(-12.0, 12.0);
+                                            state.rpad_dx += (d * 0.05).clamp(-12.0, 12.0);
                                         }
                                     }
                                     entry.0 = Some(value);
@@ -596,7 +596,7 @@ async fn spawn_evdev_fallback(
                                     if let Some(prev) = entry.1 {
                                         let d = (value - prev) as f32;
                                         if d.abs() < 400.0 {
-                                            state.trackpad_dy += (d * 0.05).clamp(-12.0, 12.0);
+                                            state.rpad_dy += (d * 0.05).clamp(-12.0, 12.0);
                                         }
                                     }
                                     entry.1 = Some(value);
@@ -610,10 +610,10 @@ async fn spawn_evdev_fallback(
                             pad_saw_rel = true;
                             match axis {
                                 RelativeAxisCode::REL_X => {
-                                    state.trackpad_dx += (value as f32).clamp(-12.0, 12.0);
+                                    state.rpad_dx += (value as f32).clamp(-12.0, 12.0);
                                 }
                                 RelativeAxisCode::REL_Y => {
-                                    state.trackpad_dy += (value as f32).clamp(-12.0, 12.0);
+                                    state.rpad_dy += (value as f32).clamp(-12.0, 12.0);
                                 }
                                 _ => {}
                             }
@@ -624,8 +624,8 @@ async fn spawn_evdev_fallback(
                 }
             }
 
-            state.trackpad_dx = state.trackpad_dx.clamp(-20.0, 20.0);
-            state.trackpad_dy = state.trackpad_dy.clamp(-20.0, 20.0);
+            state.rpad_dx = state.rpad_dx.clamp(-20.0, 20.0);
+            state.rpad_dy = state.rpad_dy.clamp(-20.0, 20.0);
 
             if tx.send(InputEvent::State(state.clone())).await.is_err() {
                 break;

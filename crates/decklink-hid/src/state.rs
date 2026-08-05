@@ -20,11 +20,15 @@ pub struct ControllerState {
     pub ry: f32,
     pub lt: f32,
     pub rt: f32,
-    /// Relative trackpad motion (right pad preferred for mouse).
-    pub trackpad_dx: f32,
-    pub trackpad_dy: f32,
-    pub trackpad_touch: bool,
-    pub trackpad_click: bool,
+    /// Relative motion from left / right physical trackpads (Desktop mouse).
+    pub lpad_dx: f32,
+    pub lpad_dy: f32,
+    pub rpad_dx: f32,
+    pub rpad_dy: f32,
+    pub lpad_touch: bool,
+    pub rpad_touch: bool,
+    pub lpad_click: bool,
+    pub rpad_click: bool,
     /// Gyro angular rate (rad/s) — pitch, yaw, roll.
     pub gyro_x: f32,
     pub gyro_y: f32,
@@ -48,8 +52,10 @@ impl ControllerState {
     }
 
     pub fn clear_relative(&mut self) {
-        self.trackpad_dx = 0.0;
-        self.trackpad_dy = 0.0;
+        self.lpad_dx = 0.0;
+        self.lpad_dy = 0.0;
+        self.rpad_dx = 0.0;
+        self.rpad_dy = 0.0;
     }
 
     pub fn to_gamepad_report(&self) -> GamepadReport {

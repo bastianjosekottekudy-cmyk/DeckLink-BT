@@ -52,33 +52,50 @@ fn idle_gamepad() -> HidPacket {
         .expect("idle gamepad")
 }
 
-/// Keyboard & Mouse: right trackpad (primary) + right stick; face/D-pad/left-stick → keys.
+/// Keyboard & Mouse: Deck trackpads + right stick; face/D-pad/left-stick → keys.
+///
+/// - Either pad alone → move cursor
+/// - Left pad click → left mouse button; right pad click → right mouse button
+/// - Both pads touched together → vertical scroll (no cursor move)
 fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     let mut packets = Vec::new();
 
+    let both = state.lpad_touch && state.rpad_touch;
     let mut mx = 0.0f32;
     let mut my = 0.0f32;
-    // Physical right pad: already relative deltas from hidraw (never absolute).
-    if state.trackpad_touch {
-        mx += state.trackpad_dx;
-        my += state.trackpad_dy;
+    let mut wheel = 0i8;
+
+    if both {
+        // Two-finger scroll: average vertical motion from both pads.
+        let scroll_y = (state.lpad_dy + state.rpad_dy) * 0.5;
+        wheel = (scroll_y * 0.35).round().clamp(-7.0, 7.0) as i8;
     } else {
-        // Right stick only when pad is not touched (large deadzone).
-        const STICK_DZ: f32 = 0.45;
-        if state.rx.abs() > STICK_DZ {
-            mx += (state.rx.signum() * (state.rx.abs() - STICK_DZ)) * 8.0;
+        if state.lpad_touch {
+            mx += state.lpad_dx;
+            my += state.lpad_dy;
         }
-        if state.ry.abs() > STICK_DZ {
-            my += (state.ry.signum() * (state.ry.abs() - STICK_DZ)) * 8.0;
+        if state.rpad_touch {
+            mx += state.rpad_dx;
+            my += state.rpad_dy;
+        }
+        if !state.lpad_touch && !state.rpad_touch {
+            const STICK_DZ: f32 = 0.45;
+            if state.rx.abs() > STICK_DZ {
+                mx += (state.rx.signum() * (state.rx.abs() - STICK_DZ)) * 8.0;
+            }
+            if state.ry.abs() > STICK_DZ {
+                my += (state.ry.signum() * (state.ry.abs() - STICK_DZ)) * 8.0;
+            }
         }
     }
     let dx = mx.round().clamp(-20.0, 20.0) as i8;
     let dy = my.round().clamp(-20.0, 20.0) as i8;
+
     let mut buttons = MouseButtons::empty();
-    if state.rt > 0.4 || state.trackpad_click {
+    if state.lpad_click {
         buttons |= MouseButtons::LEFT;
     }
-    if state.lt > 0.4 {
+    if state.rpad_click {
         buttons |= MouseButtons::RIGHT;
     }
     if state.buttons.contains(GamepadButtons::R3) {
@@ -86,15 +103,14 @@ fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     }
     let btn_bits = buttons.bits();
     let prev_btns = LAST_MOUSE_BUTTONS.swap(btn_bits, Ordering::Relaxed);
-    // Emit on motion, pressed buttons, or button release edge (clear host buttons).
-    if dx != 0 || dy != 0 || btn_bits != 0 || prev_btns != 0 {
+    if dx != 0 || dy != 0 || wheel != 0 || btn_bits != 0 || prev_btns != 0 {
         packets.push(HidPacket {
             report_id: MOUSE_REPORT_ID,
             data: MouseReport {
                 buttons,
                 dx,
                 dy,
-                wheel: 0,
+                wheel,
             }
             .pack()
             .to_vec(),
@@ -202,9 +218,9 @@ mod tests {
     #[test]
     fn trackpad_touch_drives_mouse() {
         let mut s = ControllerState::default();
-        s.trackpad_touch = true;
-        s.trackpad_dx = 4.0;
-        s.trackpad_dy = -3.0;
+        s.rpad_touch = true;
+        s.rpad_dx = 4.0;
+        s.rpad_dy = -3.0;
         let o = map_state(Profile::Desktop, &s);
         let mouse = o
             .packets
@@ -213,6 +229,40 @@ mod tests {
             .expect("mouse packet");
         assert_eq!(mouse.data[1], 4u8);
         assert_eq!(mouse.data[2] as i8, -3);
+    }
+
+    #[test]
+    fn left_click_right_click_from_pads() {
+        let mut s = ControllerState::default();
+        s.lpad_click = true;
+        s.rpad_click = true;
+        let o = map_state(Profile::Desktop, &s);
+        let mouse = o
+            .packets
+            .iter()
+            .find(|p| p.report_id == MOUSE_REPORT_ID)
+            .expect("mouse");
+        assert_eq!(mouse.data[0] & 0b11, 0b11); // left+right
+    }
+
+    #[test]
+    fn both_pads_scroll_not_move() {
+        let mut s = ControllerState::default();
+        s.lpad_touch = true;
+        s.rpad_touch = true;
+        s.lpad_dy = 10.0;
+        s.rpad_dy = 10.0;
+        s.lpad_dx = 5.0;
+        s.rpad_dx = 5.0;
+        let o = map_state(Profile::Desktop, &s);
+        let mouse = o
+            .packets
+            .iter()
+            .find(|p| p.report_id == MOUSE_REPORT_ID)
+            .expect("mouse");
+        assert_eq!(mouse.data[1], 0); // no dx while scrolling
+        assert_eq!(mouse.data[2], 0); // no dy
+        assert_ne!(mouse.data[3], 0); // wheel
     }
 
     #[test]

@@ -248,7 +248,7 @@ export component MainWindow inherits Window {
                 wrap: word-wrap;
             }
             Text {
-                text: "Leave Advertise ON for reconnects (do not Stop between sessions). Mouse = Deck right trackpad. Xbox mapping matches A/B/X/Y/LB/RB/Back/Start/Guide.";
+                text: "Leave Advertise ON for reconnects. Mouse: left pad click=LMB, right pad click=RMB, either pad moves, both pads together=scroll.";
                 color: #8aa0b5;
                 font-size: 14px;
                 wrap: word-wrap;
@@ -295,7 +295,7 @@ export component MainWindow inherits Window {
                         vertical-alignment: center;
                         wrap: word-wrap;
                         text: root.input-ok
-                            ? "Use the Deck RIGHT trackpad (or right stick) to move the PC mouse.\nOn-screen pad disabled — it was slamming the cursor."
+                            ? "Deck trackpads:\n• Left click = left pad click\n• Right click = right pad click\n• Move = either pad\n• Scroll = touch both pads"
                             : "Start Advertise, then pair on the PC.";
                         color: #8a9aaa;
                         font-size: 14px;
