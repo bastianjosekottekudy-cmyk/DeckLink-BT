@@ -1,0 +1,29 @@
+---
+description: Bluetooth HOGP pairing invariants — do not bounce between the same two "fixes"
+globs: crates/decklink-bt/**/*
+alwaysApply: false
+---
+
+# DeckLink BT HOGP pairing — stop the fix cycle
+
+Two real failure modes exist. Fixing one must **not** reintroduce the other.
+
+| Mode | Symptom in `decklink.log` | Wrong "fix" |
+|------|---------------------------|----------------|
+| **A — Stale watcher** | `HID host ready` / `host subscribed`, then later force-disconnect | Remove all disconnect logic forever |
+| **B — Half-pair** | ACL `DeviceAdded` / passkey, but **zero** `host subscribed` for tens of seconds | Blind force-disconnect from any watcher |
+
+## Hard invariants (do not violate)
+
+1. **HID-ready = CCCD only** — Treat the link as HID-live only via `announced` (set when the host subscribes to a HID input report). Do **not** treat leftover notifier `Vec` lengths as proof of a new subscribe.
+2. **One generation per address** — `DeviceAdded` / `DeviceRemoved` bumps a per-address generation. A superseded watcher may **only exit**. It must never `disconnect()`, clear notifiers, or `restart_adv()`.
+3. **Half-pair disconnect is allowed only when all are true** — current generation, peer still connected, `announced` still false after a final recheck, and HID wait timed out (~20–30s). Successful HID (`announced`) means this watcher must **never** disconnect for “no HID”.
+4. **Do not toggle** `set_discoverable(true/false)`, alias steamdeck↔DeckLink, agent on/off, or `encrypt_read` as a pairing “fix” without a new `btmon`/`decklink.log` proof. Those already bounced.
+5. **Do not bump version** for pairing fixes unless the user asks; replace the current release tag assets.
+
+## Before changing pairing code
+
+- Read the latest fail+success `DIAG BT` lines in `decklink.log`.
+- Name which mode (A or B) you are fixing.
+- State which invariant preserves the other mode.
+---
