@@ -3,14 +3,15 @@
 //! egui/eframe research (issues #5229, #7776, discussion #737):
 //!   • `ViewportCommand::Visible(false)` / Win32 `SW_HIDE` → event loop often spins a
 //!     full core and never runs `update()`, so Show/Quit via egui break.
-//!   • Working approach: capture HWND; tray actions call Win32 directly.
-//!   • For low CPU we **minimize + WS_EX_TOOLWINDOW** (hide from taskbar) instead of
-//!     SW_HIDE, so egui still ticks and we can `sleep` in `update` while in the tray.
+//!   • `SW_MINIMIZE` leaves a floating title chip and taskbar peeks on hover.
+//!   • Working approach: capture HWND; park **off-screen** + `WS_EX_TOOLWINDOW`;
+//!     tray **Click** (not hover) restores; Quit exits from the tray thread;
+//!     sleep while parked for ~0% CPU.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
@@ -18,20 +19,23 @@ use eframe::egui;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
-    TrayIcon, TrayIconBuilder, TrayIconEvent,
+    MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetWindowLongPtrW, IsWindowVisible, SetForegroundWindow, SetWindowLongPtrW,
-    ShowWindow, GWL_EXSTYLE, SW_MINIMIZE, SW_RESTORE, SW_SHOWDEFAULT, WINDOW_EX_STYLE,
-    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    FindWindowW, GetWindowLongPtrW, GetWindowRect, IsWindowVisible, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, SWP_NOACTIVATE, SWP_NOZORDER,
+    SW_RESTORE, SW_SHOWDEFAULT, WINDOW_EX_STYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 use crate::server::HostHandle;
 
 pub const WINDOW_TITLE: &str = "DeckLink Host";
 pub const TRAY_RPC_ADDR: &str = "127.0.0.1:31416";
+
+/// Saved client placement before parking off-screen: x, y, w, h.
+type SavedPlace = (i32, i32, i32, i32);
 
 fn to_wide(s: &str) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
@@ -70,23 +74,40 @@ fn resolve(slot: &AtomicIsize) -> isize {
     found
 }
 
-/// Minimize + remove from taskbar (keeps egui event loop alive → we can sleep).
-fn win_to_tray(slot: &AtomicIsize) -> bool {
+/// Park off-screen + hide from taskbar (no minimize chip, no hover peek).
+fn win_to_tray(slot: &AtomicIsize, saved: &Mutex<Option<SavedPlace>>) -> bool {
     let Some(h) = as_hwnd(resolve(slot)) else {
         return false;
     };
     unsafe {
+        let mut rc = RECT::default();
+        if GetWindowRect(h, &mut rc).is_ok() {
+            let w = (rc.right - rc.left).max(1);
+            let hgt = (rc.bottom - rc.top).max(1);
+            // Only remember on-screen placements (not a previous park).
+            if rc.left > -10_000 {
+                *saved.lock().unwrap() = Some((rc.left, rc.top, w, hgt));
+            }
+        }
         let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
         let mut style = WINDOW_EX_STYLE(ex as u32);
         style |= WS_EX_TOOLWINDOW;
         style &= !WS_EX_APPWINDOW;
         SetWindowLongPtrW(h, GWL_EXSTYLE, style.0 as isize);
-        let _ = ShowWindow(h, SW_MINIMIZE);
+        let _ = SetWindowPos(
+            h,
+            None,
+            -32_000,
+            -32_000,
+            1,
+            1,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     }
     true
 }
 
-fn win_from_tray(slot: &AtomicIsize) -> bool {
+fn win_from_tray(slot: &AtomicIsize, saved: &Mutex<Option<SavedPlace>>) -> bool {
     let Some(h) = as_hwnd(resolve(slot)) else {
         return false;
     };
@@ -96,6 +117,9 @@ fn win_from_tray(slot: &AtomicIsize) -> bool {
         style &= !WS_EX_TOOLWINDOW;
         style |= WS_EX_APPWINDOW;
         SetWindowLongPtrW(h, GWL_EXSTYLE, style.0 as isize);
+        if let Some((x, y, w, hgt)) = *saved.lock().unwrap() {
+            let _ = SetWindowPos(h, None, x, y, w, hgt, SWP_NOZORDER);
+        }
         let _ = ShowWindow(h, SW_SHOWDEFAULT);
         let _ = ShowWindow(h, SW_RESTORE);
         let _ = SetForegroundWindow(h);
@@ -113,6 +137,7 @@ struct HostApp {
     handle: HostHandle,
     tray: Option<TrayIcon>,
     hwnd: Arc<AtomicIsize>,
+    saved_place: Arc<Mutex<Option<SavedPlace>>>,
     in_tray: Arc<AtomicBool>,
     last_tip: String,
     last_gen: u64,
@@ -135,7 +160,7 @@ impl eframe::App for HostApp {
         if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.in_tray.store(true, Ordering::SeqCst);
-            let _ = win_to_tray(&self.hwnd);
+            let _ = win_to_tray(&self.hwnd, &self.saved_place);
         }
 
         if self.in_tray.load(Ordering::SeqCst) {
@@ -233,7 +258,12 @@ impl eframe::App for HostApp {
     }
 }
 
-fn spawn_rpc(hwnd: Arc<AtomicIsize>, in_tray: Arc<AtomicBool>, stop: Arc<AtomicBool>) {
+fn spawn_rpc(
+    hwnd: Arc<AtomicIsize>,
+    saved: Arc<Mutex<Option<SavedPlace>>>,
+    in_tray: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+) {
     std::thread::Builder::new()
         .name("decklink-tray-rpc".into())
         .spawn(move || {
@@ -252,12 +282,12 @@ fn spawn_rpc(hwnd: Arc<AtomicIsize>, in_tray: Arc<AtomicBool>, stop: Arc<AtomicB
                 match line.trim().to_ascii_uppercase().as_str() {
                     "SHOW" => {
                         in_tray.store(false, Ordering::SeqCst);
-                        let ok = win_from_tray(&hwnd);
+                        let ok = win_from_tray(&hwnd, &saved);
                         let _ = writeln!(s, "{}", if ok { "OK" } else { "ERR" });
                     }
                     "HIDE" => {
                         in_tray.store(true, Ordering::SeqCst);
-                        let ok = win_to_tray(&hwnd);
+                        let ok = win_to_tray(&hwnd, &saved);
                         let _ = writeln!(s, "{}", if ok { "OK" } else { "ERR" });
                     }
                     "QUIT" => {
@@ -307,11 +337,17 @@ pub fn run_ui(handle: HostHandle, tray_rpc: bool) -> Result<()> {
     let show_id = show_item.id().clone();
     let quit_id = quit_item.id().clone();
     let hwnd = Arc::new(AtomicIsize::new(0));
+    let saved_place: Arc<Mutex<Option<SavedPlace>>> = Arc::new(Mutex::new(None));
     let in_tray = Arc::new(AtomicBool::new(false));
     let handle_ui = handle.clone();
 
     if tray_rpc {
-        spawn_rpc(hwnd.clone(), in_tray.clone(), handle_ui.stop.clone());
+        spawn_rpc(
+            hwnd.clone(),
+            saved_place.clone(),
+            in_tray.clone(),
+            handle_ui.stop.clone(),
+        );
     }
 
     let result = eframe::run_native(
@@ -325,6 +361,7 @@ pub fn run_ui(handle: HostHandle, tray_rpc: bool) -> Result<()> {
             }
 
             let hwnd_m = hwnd.clone();
+            let saved_m = saved_place.clone();
             let in_tray_m = in_tray.clone();
             let stop_m = handle_ui.stop.clone();
             MenuEvent::set_event_handler(Some(move |ev: MenuEvent| {
@@ -333,21 +370,37 @@ pub fn run_ui(handle: HostHandle, tray_rpc: bool) -> Result<()> {
                 }
                 if ev.id == show_id {
                     in_tray_m.store(false, Ordering::SeqCst);
-                    let _ = win_from_tray(&hwnd_m);
+                    let _ = win_from_tray(&hwnd_m, &saved_m);
                 }
             }));
 
             let hwnd_c = hwnd.clone();
+            let saved_c = saved_place.clone();
             let in_tray_c = in_tray.clone();
-            TrayIconEvent::set_event_handler(Some(move |_ev: TrayIconEvent| {
-                in_tray_c.store(false, Ordering::SeqCst);
-                let _ = win_from_tray(&hwnd_c);
+            TrayIconEvent::set_event_handler(Some(move |ev: TrayIconEvent| {
+                // Hover Enter/Move must NOT restore the window.
+                let show = matches!(
+                    ev,
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } | TrayIconEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    }
+                );
+                if show {
+                    in_tray_c.store(false, Ordering::SeqCst);
+                    let _ = win_from_tray(&hwnd_c, &saved_c);
+                }
             }));
 
             Ok(Box::new(HostApp {
                 handle: handle_ui,
                 tray: Some(tray),
                 hwnd,
+                saved_place,
                 in_tray,
                 last_tip: String::new(),
                 last_gen: 0,
@@ -411,6 +464,17 @@ pub fn run_tray_self_test() -> Result<()> {
         bail!("self-test: HIDE failed: {r:?}");
     }
     std::thread::sleep(Duration::from_millis(500));
+    // Off-screen park — still "visible" to Win32, but left < -1000.
+    let h = find_by_title();
+    if h != 0 {
+        unsafe {
+            let mut rc = RECT::default();
+            if GetWindowRect(HWND(h as *mut _), &mut rc).is_ok() && rc.left > -1000 {
+                let _ = child.kill();
+                bail!("self-test: window still on-screen after HIDE ({},{})", rc.left, rc.top);
+            }
+        }
+    }
 
     let r = rpc("SHOW")?;
     if !r.trim().eq_ignore_ascii_case("OK") {
@@ -422,6 +486,13 @@ pub fn run_tray_self_test() -> Result<()> {
     if h == 0 || !unsafe { IsWindowVisible(HWND(h as *mut _)).as_bool() } {
         let _ = child.kill();
         bail!("self-test: not visible after SHOW");
+    }
+    unsafe {
+        let mut rc = RECT::default();
+        if GetWindowRect(HWND(h as *mut _), &mut rc).is_ok() && rc.left < -1000 {
+            let _ = child.kill();
+            bail!("self-test: window still off-screen after SHOW");
+        }
     }
 
     let _ = rpc("QUIT");
