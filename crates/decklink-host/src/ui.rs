@@ -223,6 +223,16 @@ impl eframe::App for HostApp {
                 ui.label(format!("listen {}", st.bind));
             });
             ui.add_space(8.0);
+            ui.label("This PC on Wi‑Fi / LAN (UDP 31415):");
+            if st.lan_ips.is_empty() {
+                ui.label("(no IPv4 found yet)");
+            } else {
+                for line in &st.lan_ips {
+                    ui.monospace(line);
+                }
+            }
+            ui.label("On Deck: Connect, or type the Wi‑Fi IP above.");
+            ui.add_space(8.0);
             if st.vigem_ok {
                 ui.colored_label(egui::Color32::from_rgb(61, 214, 140), "ViGEmBus: ready");
             } else {
@@ -327,7 +337,7 @@ pub fn run_ui(handle: HostHandle, tray_rpc: bool) -> Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([460.0, 300.0])
+            .with_inner_size([480.0, 380.0])
             .with_title(WINDOW_TITLE)
             .with_resizable(false),
         centered: true,

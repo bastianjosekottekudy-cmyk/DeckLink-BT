@@ -14,6 +14,8 @@ mod firewall;
 #[cfg(windows)]
 mod inject;
 #[cfg(windows)]
+mod lan;
+#[cfg(windows)]
 mod pad;
 #[cfg(windows)]
 mod server;

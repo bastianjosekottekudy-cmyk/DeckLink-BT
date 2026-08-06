@@ -1,4 +1,10 @@
 //! Ensure Windows Firewall allows DeckLink Host UDP inbound.
+//!
+//! Windows often creates **Block** rules when the first firewall prompt is dismissed.
+//! Those stick to a specific exe path and silently kill Deck discovery. We:
+//!   1. Remove Block rules for any `decklink-host.exe`
+//!   2. Allow UDP 31415 for **any** program (path-independent)
+//!   3. Allow UDP 31415 for this exact exe
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -7,10 +13,11 @@ use tracing::{info, warn};
 
 use decklink_net::DEFAULT_PORT;
 
-const RULE_NAME: &str = "DeckLink Host UDP";
+const RULE_PORT: &str = "DeckLink Host UDP Port";
+const RULE_EXE: &str = "DeckLink Host UDP";
+const MARKER_VER: &str = "v2";
 
-/// Best-effort: allow inbound UDP on the DeckLink port for this exe.
-/// Fast path: skip netsh if we already succeeded for this exe path.
+/// Best-effort: clear DeckLink blocks and allow inbound UDP 31415.
 pub fn ensure_firewall_rule() {
     let Some(exe) = std::env::current_exe().ok() else {
         warn!("cannot resolve exe path for firewall rule");
@@ -18,44 +25,58 @@ pub fn ensure_firewall_rule() {
     };
     let exe_s = exe.display().to_string();
 
-    if marker_matches(&exe_s) {
-        info!("firewall rule marker ok — skip netsh");
+    if marker_matches(&exe_s) && !has_block_rules() {
+        info!("firewall marker {MARKER_VER} ok — skip");
         return;
     }
 
-    if rule_exists() {
-        write_marker(&exe_s);
-        info!("firewall rule already present ({RULE_NAME})");
-        return;
-    }
-
-    let args = format!(
-        "advfirewall firewall add rule name=\"{RULE_NAME}\" dir=in action=allow \
-         protocol=UDP localport={DEFAULT_PORT} program=\"{exe_s}\" profile=any enable=yes"
+    let exe_escaped = exe_s.replace('\'', "''");
+    let ps = format!(
+        "$ErrorActionPreference='SilentlyContinue'; \
+         Get-NetFirewallApplicationFilter | Where-Object {{ $_.Program -like '*decklink-host.exe' }} | ForEach-Object {{ \
+           $r = $_ | Get-NetFirewallRule; \
+           if ($r -and $r.Action -eq 'Block') {{ Remove-NetFirewallRule -Name $r.Name | Out-Null }} \
+         }}; \
+         if (-not (Get-NetFirewallRule -DisplayName '{RULE_PORT}' -ErrorAction SilentlyContinue)) {{ \
+           New-NetFirewallRule -DisplayName '{RULE_PORT}' -Direction Inbound -Action Allow \
+             -Protocol UDP -LocalPort {DEFAULT_PORT} -Profile Any | Out-Null \
+         }}; \
+         $exe = '{exe_escaped}'; \
+         Get-NetFirewallRule -DisplayName '{RULE_EXE}' -ErrorAction SilentlyContinue | Remove-NetFirewallRule; \
+         New-NetFirewallRule -DisplayName '{RULE_EXE}' -Direction Inbound -Action Allow \
+           -Protocol UDP -LocalPort {DEFAULT_PORT} -Program $exe -Profile Any | Out-Null; \
+         exit 0"
     );
 
-    if run_netsh(&args, false) {
+    if run_ps(&ps, false) || run_ps(&ps, true) {
         write_marker(&exe_s);
-        info!("firewall rule added (UDP {DEFAULT_PORT})");
-        return;
-    }
-    warn!("firewall rule needs elevation — prompting UAC…");
-    if run_netsh(&args, true) {
-        write_marker(&exe_s);
-        info!("firewall rule added with elevation (UDP {DEFAULT_PORT})");
+        info!("firewall: UDP {DEFAULT_PORT} allowed (blocks cleared)");
     } else {
         warn!(
-            "could not add firewall rule — allow UDP {DEFAULT_PORT} inbound for DeckLink Host \
-             in Windows Defender Firewall, or discovery will fail"
+            "could not update firewall — allow UDP {DEFAULT_PORT} inbound, \
+             and remove any Block rules for decklink-host.exe"
         );
     }
+}
+
+fn has_block_rules() -> bool {
+    let status = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "if (Get-NetFirewallApplicationFilter | Where-Object { $_.Program -like '*decklink-host.exe' } | ForEach-Object { $_ | Get-NetFirewallRule } | Where-Object { $_.Action -eq 'Block' -and $_.Enabled }) { exit 0 } else { exit 1 }",
+        ])
+        .status();
+    matches!(status, Ok(s) if s.success())
 }
 
 fn marker_path() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("DeckLink")
-        .join("firewall_rule_v1.txt")
+        .join(format!("firewall_rule_{MARKER_VER}.txt"))
 }
 
 fn marker_matches(exe: &str) -> bool {
@@ -73,38 +94,26 @@ fn write_marker(exe: &str) {
     let _ = std::fs::write(path, exe);
 }
 
-fn rule_exists() -> bool {
-    let out = Command::new("netsh")
-        .args([
-            "advfirewall",
-            "firewall",
-            "show",
-            "rule",
-            &format!("name={RULE_NAME}"),
-        ])
-        .output();
-    match out {
-        Ok(o) => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            o.status.success() && text.contains(RULE_NAME) && !text.contains("No rules match")
-        }
-        Err(_) => false,
-    }
-}
-
-fn run_netsh(args: &str, elevate: bool) -> bool {
+fn run_ps(script: &str, elevate: bool) -> bool {
     if elevate {
-        let ps = format!(
-            "Start-Process -FilePath netsh.exe -ArgumentList '{}' -Verb RunAs -Wait",
-            args.replace('\'', "''")
+        let dir = std::env::temp_dir();
+        let path = dir.join("decklink_fw.ps1");
+        if std::fs::write(&path, script).is_err() {
+            return false;
+        }
+        let path_s = path.display().to_string().replace('\'', "''");
+        let launcher = format!(
+            "Start-Process powershell -Verb RunAs -Wait -ArgumentList \
+             '-NoProfile','-ExecutionPolicy','Bypass','-File','{path_s}'"
         );
         let status = Command::new("powershell")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps])
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &launcher])
             .status();
+        let _ = std::fs::remove_file(&path);
         matches!(status, Ok(s) if s.success())
     } else {
-        let status = Command::new("cmd")
-            .args(["/C", &format!("netsh {args}")])
+        let status = Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
             .status();
         matches!(status, Ok(s) if s.success())
     }

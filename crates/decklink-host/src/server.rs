@@ -18,6 +18,7 @@ use decklink_net::{
 };
 
 use crate::inject::Injector;
+use crate::lan;
 use crate::pad::VirtualPad;
 
 #[derive(Debug, Clone, Default)]
@@ -28,6 +29,8 @@ pub struct HostStatus {
     pub peer_name: Option<String>,
     pub last_error: Option<String>,
     pub vigem_ok: bool,
+    /// Local IPv4s the Deck can reach (e.g. `Wi-Fi 2: 192.168.0.88`).
+    pub lan_ips: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -122,9 +125,13 @@ fn run_loop(
     {
         let mut s = status.lock().unwrap();
         s.listening = true;
+        s.lan_ips = lan::format_lan_ips();
         bump(&status_gen);
     }
     info!("listening — Deck Connect will find this PC automatically");
+    for ip in lan::format_lan_ips() {
+        info!("LAN {ip}");
+    }
 
     let mut buf = [0u8; MAX_PACKET];
     let mut peer: Option<(SocketAddr, Instant)> = None;
@@ -135,8 +142,19 @@ fn run_loop(
     let mut last_announce = Instant::now()
         .checked_sub(Duration::from_secs(10))
         .unwrap_or_else(Instant::now);
+    let mut last_ip_refresh = Instant::now();
 
     while !stop.load(Ordering::SeqCst) {
+        if last_ip_refresh.elapsed() > Duration::from_secs(10) {
+            last_ip_refresh = Instant::now();
+            let ips = lan::format_lan_ips();
+            let mut s = status.lock().unwrap();
+            if s.lan_ips != ips {
+                s.lan_ips = ips;
+                bump(&status_gen);
+            }
+        }
+
         if pad.is_none() && last_vigem_retry.elapsed() > Duration::from_secs(2) {
             last_vigem_retry = Instant::now();
             match VirtualPad::new() {
