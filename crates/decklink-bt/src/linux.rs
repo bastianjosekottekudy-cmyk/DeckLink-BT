@@ -1,6 +1,6 @@
 //! BlueZ HOGP GATT server via bluer.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -592,8 +592,10 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
     let announced_watch = hid_host_announced.clone();
     let peer_watchers = Arc::new(AtomicUsize::new(0));
     let peer_watchers_ev = peer_watchers.clone();
-    let watching: Arc<Mutex<HashSet<Address>>> = Arc::new(Mutex::new(HashSet::new()));
-    let watching_ev = watching.clone();
+    // Per-address generation: DeviceRemoved / new DeviceAdded invalidates old waiters
+    // so a stale "no HID" watcher cannot tear down a later good (or in-progress) link.
+    let peer_gen: Arc<Mutex<HashMap<Address, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+    let peer_gen_ev = peer_gen.clone();
     tokio::spawn(async move {
         while let Some(evt) = device_events.next().await {
             match evt {
@@ -603,16 +605,12 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                             if let Err(e) = dev.set_trusted(true).await {
                                 warn!("set_trusted({addr}): {e}");
                             }
-                            {
-                                let mut w = watching_ev.lock().await;
-                                if !w.insert(addr) {
-                                    info!(
-                                        "DIAG BT skip duplicate DeviceAdded for {addr} \
-                                         (watcher already active)"
-                                    );
-                                    continue;
-                                }
-                            }
+                            let my_gen = {
+                                let mut m = peer_gen_ev.lock().await;
+                                let g = m.entry(addr).or_insert(0);
+                                *g += 1;
+                                *g
+                            };
                             let name = dev
                                 .name()
                                 .await
@@ -628,7 +626,7 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                             let restart_adv = restart_adv.clone();
                             let adapter_watch = adapter2.clone();
                             let peer_watchers = peer_watchers_ev.clone();
-                            let watching = watching_ev.clone();
+                            let peer_gen = peer_gen_ev.clone();
                             let watcher_id = peer_watchers.fetch_add(1, Ordering::SeqCst) + 1;
                             let c1 = n1c.lock().await.len();
                             let c2 = n2c.lock().await.len();
@@ -636,24 +634,44 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                             let already = announced_watch.load(Ordering::SeqCst);
                             info!(
                                 "DIAG BT DeviceAdded connected peer={name} ({addr_s}) \
-                                 watcher=#{watcher_id} active_watchers={} \
-                                 notifiers_already g={c1} m={c2} k={c3} announced={already}",
+                                 watcher=#{watcher_id} gen={my_gen} active_watchers={} \
+                                 notifiers g={c1} m={c2} k={c3} announced={already}",
                                 peer_watchers.load(Ordering::SeqCst)
                             );
                             tokio::spawn(async move {
-                                let clear_notifiers = || async {
-                                    n1c.lock().await.clear();
-                                    n2c.lock().await.clear();
-                                    n3c.lock().await.clear();
+                                let still_current = || async {
+                                    peer_gen.lock().await.get(&addr).copied() == Some(my_gen)
                                 };
                                 let release = || async {
-                                    watching.lock().await.remove(&addr);
                                     peer_watchers.fetch_sub(1, Ordering::SeqCst);
                                 };
+                                let peer_connected = || async {
+                                    match adapter_watch.device(addr) {
+                                        Ok(d) => matches!(d.is_connected().await, Ok(true)),
+                                        Err(_) => false,
+                                    }
+                                };
 
-                                // Wait for HID CCCDs (pairing can take a while).
+                                // Wait for HID CCCDs; abort if peer drops or we are superseded.
                                 let mut got_hid = already;
-                                for i in 0..120 {
+                                for i in 0..50 {
+                                    if !still_current().await {
+                                        info!(
+                                            "DIAG BT watcher#{watcher_id} gen={my_gen} superseded \
+                                             during HID wait — exiting"
+                                        );
+                                        release().await;
+                                        return;
+                                    }
+                                    if !peer_connected().await {
+                                        info!(
+                                            "DIAG BT watcher#{watcher_id} peer dropped during \
+                                             HID wait — exiting"
+                                        );
+                                        announced_watch.store(false, Ordering::SeqCst);
+                                        release().await;
+                                        return;
+                                    }
                                     if announced_watch.load(Ordering::SeqCst) {
                                         got_hid = true;
                                         info!(
@@ -663,7 +681,6 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                                         );
                                         break;
                                     }
-                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                                     let c1 = n1c.lock().await.len();
                                     let c2 = n2c.lock().await.len();
                                     let c3 = n3c.lock().await.len();
@@ -676,38 +693,57 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                                         got_hid = true;
                                         break;
                                     }
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                                 }
+
                                 if !got_hid && !announced_watch.load(Ordering::SeqCst) {
-                                    // Log-backed: force-disconnect killed a live HOGP link when a
-                                    // duplicate watcher missed CCCDs. Leave the ACL up; Windows
-                                    // may still enable HID, or the user can reconnect.
-                                    warn!(
-                                        "BT peer {name} ({addr_s}) still no HID after ~60s — \
-                                         NOT force-disconnecting (leave link for late CCCDs)"
-                                    );
-                                    info!(
-                                        "DIAG BT watcher#{watcher_id} no-HID warn only; \
-                                         notifiers g={} m={} k={}",
-                                        n1c.lock().await.len(),
-                                        n2c.lock().await.len(),
-                                        n3c.lock().await.len()
-                                    );
+                                    if still_current().await && peer_connected().await {
+                                        // Half-pair: ACL up, Windows never enabled HOGP CCCDs
+                                        // (seen in diag logs). Only the current generation may
+                                        // disconnect — stale watchers must not touch a later link.
+                                        warn!(
+                                            "BT peer {name} ({addr_s}) connected ~25s with no HID — \
+                                             disconnecting half-pair (gen={my_gen})"
+                                        );
+                                        if let Ok(d) = adapter_watch.device(addr) {
+                                            let _ = d.disconnect().await;
+                                        }
+                                        announced_watch.store(false, Ordering::SeqCst);
+                                        n1c.lock().await.clear();
+                                        n2c.lock().await.clear();
+                                        n3c.lock().await.clear();
+                                        release().await;
+                                        restart_adv().await;
+                                    } else {
+                                        info!(
+                                            "DIAG BT watcher#{watcher_id} no-HID but \
+                                             superseded/disconnected — no action"
+                                        );
+                                        release().await;
+                                    }
+                                    return;
                                 }
 
                                 // Watch for host disconnect → clear + re-advertise.
                                 loop {
                                     tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-                                    let connected = match adapter_watch.device(addr) {
-                                        Ok(d) => matches!(d.is_connected().await, Ok(true)),
-                                        Err(_) => false,
-                                    };
-                                    if !connected {
+                                    if !still_current().await {
+                                        info!(
+                                            "DIAG BT watcher#{watcher_id} gen={my_gen} \
+                                             superseded while connected — exiting"
+                                        );
+                                        release().await;
+                                        break;
+                                    }
+                                    if !peer_connected().await {
                                         info!(
                                             "host {name} ({addr_s}) disconnected — \
                                              clearing HID notifiers and re-advertising"
                                         );
                                         announced_watch.store(false, Ordering::SeqCst);
-                                        clear_notifiers().await;
+                                        n1c.lock().await.clear();
+                                        n2c.lock().await.clear();
+                                        n3c.lock().await.clear();
                                         let _ = event_tx2
                                             .send(BtEvent::Disconnected {
                                                 address: addr_s.clone(),
@@ -723,11 +759,16 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                     }
                 }
                 AdapterEvent::DeviceRemoved(addr) => {
+                    // Invalidate any waiter for this address immediately.
+                    {
+                        let mut m = peer_gen_ev.lock().await;
+                        let g = m.entry(addr).or_insert(0);
+                        *g += 1;
+                    }
                     info!(
-                        "DIAG BT DeviceRemoved {addr} active_watchers={}",
+                        "DIAG BT DeviceRemoved {addr} active_watchers={} (gen bumped)",
                         peer_watchers_ev.load(Ordering::SeqCst)
                     );
-                    watching_ev.lock().await.remove(&addr);
                     let _ = event_tx2
                         .send(BtEvent::Disconnected {
                             address: addr.to_string(),

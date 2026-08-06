@@ -435,7 +435,7 @@ fn apply_deck_report(
         && !state.lpad_touch
         && !state.rpad_touch
         && (state.rx.abs() > 0.05 || state.ry.abs() > 0.05)
-        && diag_throttle(2, 200)
+        && diag_throttle(2, 5000)
     {
         info!(
             "DIAG stick rest rx={:.3} ry={:.3} (not mapped to mouse)",
