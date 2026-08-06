@@ -3,7 +3,11 @@
 //! On Windows, eframe's `ViewportCommand::Visible(false)` is unsafe/broken (event loop
 //! stalls or the process dies). We hide with Win32 `ShowWindow(SW_HIDE)` instead and
 //! keep the egui window "alive" for the event loop.
+//!
+//! CPU: do **not** schedule continuous repaints. Wake only on input, tray events, or
+//! a slow status tick while the window is visible.
 
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -30,6 +34,7 @@ struct HostApp {
     in_tray: bool,
     quitting: bool,
     last_tip: String,
+    last_status_gen: u64,
 }
 
 impl HostApp {
@@ -69,6 +74,16 @@ impl HostApp {
         self.tray.take();
         self.win_show();
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn apply_tray_tooltip(&mut self, tip: &str) {
+        if tip == self.last_tip {
+            return;
+        }
+        if let Some(tray) = self.tray.as_ref() {
+            let _ = tray.set_tooltip(Some(tip));
+        }
+        self.last_tip = tip.to_string();
     }
 }
 
@@ -111,6 +126,7 @@ impl eframe::App for HostApp {
             return;
         }
 
+        let gen = self.handle.status_gen.load(Ordering::Relaxed);
         let st = self.handle.status.lock().unwrap().clone();
         let tip = if let Some(ref p) = st.peer_name {
             format!("DeckLink Host — linked: {p}")
@@ -121,18 +137,17 @@ impl eframe::App for HostApp {
         } else {
             "DeckLink Host — starting…".to_string()
         };
-        if tip != self.last_tip {
-            if let Some(tray) = self.tray.as_ref() {
-                let _ = tray.set_tooltip(Some(tip.as_str()));
-            }
-            self.last_tip = tip;
-        }
+        self.apply_tray_tooltip(&tip);
 
         if self.in_tray {
-            // Light pulse so we keep polling tray events; Win32 hide keeps winit alive.
-            ctx.request_repaint_after(Duration::from_millis(400));
+            // Idle: no scheduled GL repaints. Tray handlers + status watcher wake us.
+            self.last_status_gen = gen;
             return;
         }
+
+        // Visible window: redraw on status change; otherwise slow tick only.
+        let status_changed = gen != self.last_status_gen;
+        self.last_status_gen = gen;
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(8.0);
@@ -188,7 +203,13 @@ impl eframe::App for HostApp {
             }
         });
 
-        ctx.request_repaint_after(Duration::from_millis(250));
+        // Slow heartbeat while visible so WAITING → LINKED updates without input.
+        // (Status watcher also wakes us; this is a cheap fallback.)
+        if status_changed {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        } else {
+            ctx.request_repaint_after(Duration::from_secs(2));
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -238,7 +259,6 @@ pub fn run_ui(handle: HostHandle, title: String) -> Result<()> {
         "DeckLink Host",
         options,
         Box::new(move |cc| {
-            // Wake egui when the tray is used while the window is hidden.
             let ctx_menu = cc.egui_ctx.clone();
             MenuEvent::set_event_handler(Some(move |_ev| {
                 ctx_menu.request_repaint();
@@ -247,6 +267,25 @@ pub fn run_ui(handle: HostHandle, title: String) -> Result<()> {
             TrayIconEvent::set_event_handler(Some(move |_ev| {
                 ctx_tray.request_repaint();
             }));
+
+            // Wake UI when host status changes — no busy loop.
+            let ctx_watch = cc.egui_ctx.clone();
+            let gen = handle_ui.status_gen.clone();
+            let stop = handle_ui.stop.clone();
+            std::thread::Builder::new()
+                .name("decklink-ui-watch".into())
+                .spawn(move || {
+                    let mut last = gen.load(Ordering::Relaxed);
+                    while !stop.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(500));
+                        let now = gen.load(Ordering::Relaxed);
+                        if now != last {
+                            last = now;
+                            ctx_watch.request_repaint();
+                        }
+                    }
+                })
+                .ok();
 
             let mut hwnd = None;
             if let Ok(wh) = cc.window_handle() {
@@ -264,6 +303,7 @@ pub fn run_ui(handle: HostHandle, title: String) -> Result<()> {
                 in_tray: false,
                 quitting: false,
                 last_tip: String::new(),
+                last_status_gen: 0,
             }))
         }),
     );

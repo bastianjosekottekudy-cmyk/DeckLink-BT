@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,8 @@ pub struct HostStatus {
 #[derive(Clone)]
 pub struct HostHandle {
     pub status: Arc<Mutex<HostStatus>>,
+    /// Bumped whenever UI-visible status fields change (wakes idle UI cheaply).
+    pub status_gen: Arc<AtomicU64>,
     pub stop: Arc<AtomicBool>,
 }
 
@@ -42,60 +44,72 @@ impl HostHandle {
     }
 }
 
+fn bump(gen: &AtomicU64) {
+    gen.fetch_add(1, Ordering::Relaxed);
+}
+
 pub fn spawn_host(bind: String, name: String) -> Result<HostHandle> {
     let status = Arc::new(Mutex::new(HostStatus {
         bind: bind.clone(),
         ..Default::default()
     }));
+    let status_gen = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let status_bg = status.clone();
+    let gen_bg = status_gen.clone();
     let stop_bg = stop.clone();
 
     std::thread::Builder::new()
         .name("decklink-udp".into())
         .spawn(move || {
-            if let Err(e) = run_loop(bind, name, status_bg.clone(), stop_bg) {
+            if let Err(e) = run_loop(bind, name, status_bg.clone(), gen_bg.clone(), stop_bg) {
                 let mut s = status_bg.lock().unwrap();
                 s.last_error = Some(e.to_string());
                 s.listening = false;
+                bump(&gen_bg);
                 warn!("host loop ended: {e}");
             }
         })?;
 
-    Ok(HostHandle { status, stop })
+    Ok(HostHandle {
+        status,
+        status_gen,
+        stop,
+    })
 }
 
 fn run_loop(
     bind: String,
     name: String,
     status: Arc<Mutex<HostStatus>>,
+    status_gen: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
 ) -> Result<()> {
     info!("binding UDP {bind}");
     let sock = UdpSocket::bind(&bind).with_context(|| format!("bind {bind}"))?;
     sock.set_broadcast(true)?;
-    sock.set_read_timeout(Some(Duration::from_millis(50)))?;
-    // Receive Discover probes sent to the LAN multicast group.
+    // Idle: longer timeout (fewer wakeups). Fine for HID — Deck sends often when linked.
+    sock.set_read_timeout(Some(Duration::from_millis(200)))?;
     match sock.join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::UNSPECIFIED) {
         Ok(()) => info!("joined multicast {MULTICAST_ADDR}:{DEFAULT_PORT}"),
         Err(e) => warn!("multicast join failed ({e}) — broadcast-only discovery"),
     }
     let _ = sock.set_multicast_loop_v4(false);
 
-    // Keep listening even if ViGEm is missing (mouse/keyboard still work).
     let mut pad = match VirtualPad::new() {
         Ok(p) => {
             status.lock().unwrap().vigem_ok = true;
+            bump(&status_gen);
             info!("ViGEm Xbox pad ready");
             Some(p)
         }
         Err(e) => {
             let mut s = status.lock().unwrap();
             s.vigem_ok = false;
-            // Soft warning — setup thread may install the driver shortly.
             s.last_error = Some(format!(
                 "ViGEmBus starting… ({e}). Xbox mode waits; mouse/keyboard work."
             ));
+            bump(&status_gen);
             warn!("ViGEm unavailable at bind — will retry: {e}");
             None
         }
@@ -108,6 +122,7 @@ fn run_loop(
     {
         let mut s = status.lock().unwrap();
         s.listening = true;
+        bump(&status_gen);
     }
     info!("listening — Deck Connect will find this PC automatically");
 
@@ -122,7 +137,6 @@ fn run_loop(
         .unwrap_or_else(Instant::now);
 
     while !stop.load(Ordering::SeqCst) {
-        // Retry ViGEm after background install finishes.
         if pad.is_none() && last_vigem_retry.elapsed() > Duration::from_secs(2) {
             last_vigem_retry = Instant::now();
             match VirtualPad::new() {
@@ -136,14 +150,19 @@ fn run_loop(
                     {
                         s.last_error = None;
                     }
+                    bump(&status_gen);
                     pad = Some(p);
                 }
                 Err(_) => {}
             }
         }
 
-        // Periodic multicast announce (Deck probes actively; this helps stubborn LANs).
-        if last_announce.elapsed() > Duration::from_secs(2) {
+        let announce_every = if peer.is_some() {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_secs(3)
+        };
+        if last_announce.elapsed() > announce_every {
             let _ = broadcast_announce(&sock, &name, &mut seq);
             last_announce = Instant::now();
         }
@@ -159,6 +178,7 @@ fn run_loop(
                     &mut last_mods,
                     &mut last_mouse_btns,
                     &status,
+                    &status_gen,
                 );
             }
         }
@@ -194,11 +214,13 @@ fn run_loop(
                             &mut last_mods,
                             &mut last_mouse_btns,
                             &status,
+                            &status_gen,
                         );
                         peer = Some((addr, Instant::now()));
                         let mut s = status.lock().unwrap();
                         s.peer = Some(addr.to_string());
                         s.peer_name = Some(deck_name);
+                        bump(&status_gen);
                     }
                     MsgKind::Heartbeat => {
                         if let Some((p, t)) = peer.as_mut() {
@@ -221,6 +243,7 @@ fn run_loop(
                                 &mut last_mods,
                                 &mut last_mouse_btns,
                                 &status,
+                                &status_gen,
                             );
                         }
                     }
@@ -283,15 +306,16 @@ fn run_loop(
         &mut last_mods,
         &mut last_mouse_btns,
         &status,
+        &status_gen,
     );
     status.lock().unwrap().listening = false;
+    bump(&status_gen);
     Ok(())
 }
 
 fn broadcast_announce(sock: &UdpSocket, name: &str, seq: &mut u32) -> Result<()> {
     let pkt = encode(MsgKind::Announce, *seq, name.as_bytes())?;
     *seq = seq.wrapping_add(1);
-    // Multicast — Deck probes this group during discover.
     let multi = SocketAddr::V4(SocketAddrV4::new(MULTICAST_ADDR, DEFAULT_PORT));
     let _ = sock.send_to(&pkt, multi);
     let bcast = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, DEFAULT_PORT));
@@ -307,6 +331,7 @@ fn drop_peer(
     last_mods: &mut KeyModifiers,
     last_mouse_btns: &mut MouseButtons,
     status: &Arc<Mutex<HostStatus>>,
+    status_gen: &AtomicU64,
 ) {
     *peer = None;
     if let Some(pad) = pad.as_mut() {
@@ -316,4 +341,5 @@ fn drop_peer(
     let mut s = status.lock().unwrap();
     s.peer = None;
     s.peer_name = None;
+    bump(status_gen);
 }
