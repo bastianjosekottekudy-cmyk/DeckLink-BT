@@ -1,0 +1,30 @@
+---
+description: Prefer the best proven optimized approach first; avoid naive-then-patch cycles
+alwaysApply: true
+---
+
+# Proven optimized approach first
+
+Before implementing a non-trivial feature (UI lifecycle, tray, networking, drivers, GPU, installers), **research and pick the approach known to work on this platform** — then build that. Do not start with the “obvious API” if it has documented failure modes.
+
+## Do this
+
+1. **Search known pitfalls** for the stack + OS (GitHub issues, discussions, release notes) before coding.
+2. **Choose the pattern that already solves the hard constraints** (reliability, CPU, lifecycle), even if it is less elegant than the framework’s high-level API.
+3. **Define acceptance checks up front** (automated if possible): hide/show/quit, idle CPU, connect/disconnect — and only ship when they pass.
+4. **Prefer one solid design** over a chain of symptom fixes.
+
+## Avoid
+
+- Starting with a convenient API that is known-broken for this case, then patching (cancel-close hacks, event forwarding, sleeps) until it “kind of works”.
+- Treating “works on my first happy path” as done without idle-CPU and lifecycle tests.
+- Re-discovering platform bugs in production that are already documented upstream.
+
+## Example (Windows tray + egui/eframe)
+
+- **Wrong first move:** `ViewportCommand::Visible(false)` / `SW_HIDE` (event loop stalls or spins; Show/Quit break).
+- **Right first move:** capture HWND; minimize + hide from taskbar (`WS_EX_TOOLWINDOW`); tray callbacks call Win32 Show/Quit (`process::exit` if UI cannot wake); sleep while parked; automate with a self-test.
+
+## Rule of thumb
+
+If the first design needs more than one workaround for the same lifecycle bug, stop and switch to the proven native/platform approach instead of stacking patches.
