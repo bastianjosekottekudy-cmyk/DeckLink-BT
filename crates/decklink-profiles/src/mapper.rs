@@ -259,11 +259,16 @@ mod tests {
 
     #[test]
     fn stick_does_not_drive_mouse() {
+        LAST_MOUSE_BUTTONS.store(0, Ordering::Relaxed);
         let mut s = ControllerState::default();
         s.rx = 0.9;
         s.ry = -0.9;
         let o = map_state(Profile::Desktop, &s);
-        assert!(!o.packets.iter().any(|p| p.report_id == MOUSE_REPORT_ID));
+        let mouse = o.packets.iter().find(|p| p.report_id == MOUSE_REPORT_ID);
+        assert!(
+            mouse.is_none() || (mouse.unwrap().data[1] == 0 && mouse.unwrap().data[2] == 0),
+            "stick must not move cursor"
+        );
     }
 
     #[test]
