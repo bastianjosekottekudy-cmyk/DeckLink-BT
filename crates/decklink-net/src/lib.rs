@@ -10,7 +10,7 @@
 //! payload [u8; payload_len]
 //! ```
 
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::{Duration, Instant};
 
 use decklink_hid::HidPacket;
@@ -32,6 +32,10 @@ pub enum MsgKind {
     Heartbeat = 3,
     Hid = 4,
     Goodbye = 5,
+    /// LAN broadcast from Deck looking for hosts.
+    Discover = 6,
+    /// Unicast/broadcast reply from host (payload = display name).
+    Announce = 7,
 }
 
 impl MsgKind {
@@ -42,6 +46,8 @@ impl MsgKind {
             3 => Some(Self::Heartbeat),
             4 => Some(Self::Hid),
             5 => Some(Self::Goodbye),
+            6 => Some(Self::Discover),
+            7 => Some(Self::Announce),
             _ => None,
         }
     }
@@ -52,6 +58,12 @@ pub struct Envelope {
     pub kind: MsgKind,
     pub seq: u32,
     pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiscoveredHost {
+    pub addr: SocketAddr,
+    pub name: String,
 }
 
 #[derive(Debug, Error)]
@@ -72,6 +84,8 @@ pub enum NetError {
     NotConnected,
     #[error("hello timeout")]
     HelloTimeout,
+    #[error("no DeckLink host found on the LAN — is decklink-host running on the PC?")]
+    NoHostsFound,
 }
 
 pub fn encode(kind: MsgKind, seq: u32, payload: &[u8]) -> Result<Vec<u8>, NetError> {
@@ -137,15 +151,6 @@ pub fn default_bind_addr() -> String {
     format!("0.0.0.0:{DEFAULT_PORT}")
 }
 
-/// Deck-side UDP client: hello → ack, then stream HID frames.
-pub struct NetClient {
-    sock: UdpSocket,
-    peer: SocketAddr,
-    seq: u32,
-    pub peer_name: String,
-    last_rx: Instant,
-}
-
 pub fn parse_host_addr(host: &str) -> Result<SocketAddr, NetError> {
     let host = host.trim();
     if host.is_empty() {
@@ -157,7 +162,6 @@ pub fn parse_host_addr(host: &str) -> Result<SocketAddr, NetError> {
     if let Ok(addr) = host.parse::<SocketAddr>() {
         return Ok(addr);
     }
-    // Bracketed IPv6 without port: [::1]
     if host.starts_with('[') {
         if let Some(end) = host.find(']') {
             let ip = &host[1..end];
@@ -170,7 +174,6 @@ pub fn parse_host_addr(host: &str) -> Result<SocketAddr, NetError> {
             }
         }
     }
-    // Bare IPv4 / hostname / IPv6 without port
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         return Ok(SocketAddr::new(ip, DEFAULT_PORT));
     }
@@ -179,7 +182,74 @@ pub fn parse_host_addr(host: &str) -> Result<SocketAddr, NetError> {
     })
 }
 
+/// Broadcast Discover and collect Announce replies for `timeout`.
+pub fn discover_hosts(timeout: Duration) -> Result<Vec<DiscoveredHost>, NetError> {
+    let sock = UdpSocket::bind("0.0.0.0:0")?;
+    sock.set_broadcast(true)?;
+    sock.set_read_timeout(Some(Duration::from_millis(200)))?;
+
+    let discover = encode(MsgKind::Discover, 1, &[])?;
+    let bcast = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, DEFAULT_PORT));
+    sock.send_to(&discover, bcast)?;
+
+    let mut found: Vec<DiscoveredHost> = Vec::new();
+    let deadline = Instant::now() + timeout;
+    let mut buf = [0u8; MAX_PACKET];
+    while Instant::now() < deadline {
+        match sock.recv_from(&mut buf) {
+            Ok((n, addr)) => {
+                if let Ok(env) = decode(&buf[..n]) {
+                    if env.kind == MsgKind::Announce {
+                        let name = String::from_utf8_lossy(&env.payload).into_owned();
+                        let name = if name.trim().is_empty() {
+                            "DeckLink Host".into()
+                        } else {
+                            name
+                        };
+                        // Reply comes from host's data port.
+                        let host = SocketAddr::new(addr.ip(), DEFAULT_PORT);
+                        if !found.iter().any(|h| h.addr == host) {
+                            info!("discovered {name} @ {host}");
+                            found.push(DiscoveredHost { addr: host, name });
+                        }
+                    }
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                // Re-broadcast once mid-wait.
+                if Instant::now() + timeout / 2 < deadline {
+                    let _ = sock.send_to(&discover, bcast);
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(found)
+}
+
+/// Deck-side UDP client: hello → ack, then stream HID frames.
+pub struct NetClient {
+    sock: UdpSocket,
+    peer: SocketAddr,
+    seq: u32,
+    pub peer_name: String,
+    last_rx: Instant,
+}
+
 impl NetClient {
+    /// Find a host on the LAN and complete Hello.
+    pub fn connect_auto(device_name: &str) -> Result<Self, NetError> {
+        let hosts = discover_hosts(Duration::from_secs(2))?;
+        let Some(host) = hosts.into_iter().next() else {
+            return Err(NetError::NoHostsFound);
+        };
+        info!("auto-connect → {} ({})", host.name, host.addr);
+        Self::connect(&host.addr.to_string(), device_name)
+    }
+
     pub fn connect(host: &str, device_name: &str) -> Result<Self, NetError> {
         let peer = parse_host_addr(host)?;
 
@@ -269,7 +339,7 @@ impl NetClient {
                                 warn!("host sent goodbye");
                                 return Ok(false);
                             }
-                            MsgKind::Heartbeat | MsgKind::HelloAck => {}
+                            MsgKind::Heartbeat | MsgKind::HelloAck | MsgKind::Announce => {}
                             other => debug!("client ignored {other:?}"),
                         }
                     }
@@ -328,5 +398,15 @@ mod tests {
             parse_host_addr("[::1]:4000").unwrap(),
             "[::1]:4000".parse().unwrap()
         );
+    }
+
+    #[test]
+    fn discover_announce_roundtrip_kinds() {
+        let d = encode(MsgKind::Discover, 1, &[]).unwrap();
+        assert_eq!(decode(&d).unwrap().kind, MsgKind::Discover);
+        let a = encode(MsgKind::Announce, 2, b"PC").unwrap();
+        let env = decode(&a).unwrap();
+        assert_eq!(env.kind, MsgKind::Announce);
+        assert_eq!(env.payload, b"PC");
     }
 }

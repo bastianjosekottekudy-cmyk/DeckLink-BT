@@ -113,7 +113,6 @@ export component MainWindow inherits Window {
     in-out property <bool> linking: false;
     in-out property <bool> connected: false;
     in-out property <string> peer-name: "—";
-    in-out property <string> host-addr: "";
     in-out property <[string]> profile-options: [
         "Xbox Controller",
         "Keyboard & Mouse",
@@ -126,7 +125,6 @@ export component MainWindow inherits Window {
 
     callback start-connect();
     callback stop-connect();
-    callback host-addr-edited(string);
     callback profile-changed(int);
     callback refresh-targets();
     callback key-tap(int);
@@ -185,22 +183,6 @@ export component MainWindow inherits Window {
             Button {
                 text: "Disconnect";
                 clicked => { root.stop-connect(); }
-            }
-        }
-
-        HorizontalBox {
-            spacing: 8px;
-            Text {
-                text: "PC IP";
-                color: #8aa0b5;
-                font-size: 14px;
-                vertical-alignment: center;
-            }
-            LineEdit {
-                text <=> root.host-addr;
-                placeholder-text: "192.168.x.x or ip:31415";
-                horizontal-stretch: 1;
-                edited => { root.host-addr-edited(root.host-addr); }
             }
         }
 
@@ -266,13 +248,13 @@ export component MainWindow inherits Window {
                 wrap: word-wrap;
             }
             Text {
-                text: "Wi-Fi: run decklink-host on the PC (ViGEmBus), enter the PC LAN IP above, Connect. Same Wi-Fi network required.";
+                text: "Xbox mode: sticks/triggers/buttons → PC as Xbox 360. Start decklink-host on the PC, then Connect — finds it on Wi‑Fi automatically.";
                 color: #8aa0b5;
                 font-size: 14px;
                 wrap: word-wrap;
             }
             Text {
-                text: "Recent hosts";
+                text: "Recent PCs";
                 color: #8aa0b5;
                 font-size: 13px;
             }
@@ -313,8 +295,8 @@ export component MainWindow inherits Window {
                         vertical-alignment: center;
                         wrap: word-wrap;
                         text: root.input-ok
-                            ? "Host mouse: use soft L/M/R + drag this pad.\nDeck trackpads stay on the Deck."
-                            : "Enter PC IP and Connect first.";
+                            ? "Steam trackpads → PC mouse\n• Move = either pad\n• Left click = left pad click\n• Right click = right pad click\n• Scroll = both pads\n(Sticks are Xbox mode only)"
+                            : "Connect first (auto-finds the PC).";
                         color: #8a9aaa;
                         font-size: 14px;
                     }

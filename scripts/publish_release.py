@@ -22,6 +22,8 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import urllib.request
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +32,14 @@ DIST = ROOT / "dist"
 STAGE_NAME = "decklink-bt-linux-x86_64"
 TARBALL_NAME = f"{STAGE_NAME}.tar.gz"
 TARBALL = DIST / TARBALL_NAME
+HOST_STAGE_NAME = "decklink-host-windows-x86_64"
+HOST_ZIP_NAME = f"{HOST_STAGE_NAME}.zip"
+HOST_ZIP = DIST / HOST_ZIP_NAME
+VIGEM_MSI_NAME = "ViGEmBusSetup_x64.msi"
+VIGEM_MSI_URL = (
+    "https://github.com/nefarius/ViGEmBus/releases/download/"
+    "setup-v1.17.333/ViGEmBusSetup_x64.msi"
+)
 
 
 def emit(**kwargs: object) -> None:
@@ -187,30 +197,100 @@ def release_exists(tag: str) -> bool:
     return r.returncode == 0
 
 
+def ensure_vigem_msi(cache: Path) -> Path:
+    """Download official ViGEmBus MSI into cache if missing."""
+    cache.mkdir(parents=True, exist_ok=True)
+    dest = cache / VIGEM_MSI_NAME
+    if dest.is_file() and dest.stat().st_size > 100_000:
+        return dest
+    print(f"+ download {VIGEM_MSI_URL}", flush=True)
+    tmp = dest.with_suffix(".msi.part")
+    try:
+        urllib.request.urlretrieve(VIGEM_MSI_URL, tmp)
+        tmp.replace(dest)
+    except Exception as e:
+        if tmp.is_file():
+            tmp.unlink()
+        die(f"failed to download ViGEmBus MSI: {e}")
+    if not dest.is_file() or dest.stat().st_size < 100_000:
+        die("downloaded ViGEmBus MSI looks truncated")
+    emit(STATUS="vigem_msi", BYTES=dest.stat().st_size)
+    return dest
+
+
+def build_windows_host_zip() -> Path:
+    """Build decklink-host.exe and zip it with ViGEmBus MSI for auto-install."""
+    if os.name != "nt":
+        die("Windows host zip must be built on Windows")
+    DIST.mkdir(parents=True, exist_ok=True)
+    run(["cargo", "build", "--release", "-p", "decklink-host"])
+    exe = ROOT / "target" / "release" / "decklink-host.exe"
+    if not exe.is_file():
+        die(f"missing {exe}")
+
+    msi = ensure_vigem_msi(DIST / "drivers")
+    stage = DIST / HOST_STAGE_NAME
+    if stage.exists():
+        shutil.rmtree(stage)
+    stage.mkdir(parents=True)
+    shutil.copy2(exe, stage / "decklink-host.exe")
+    shutil.copy2(msi, stage / VIGEM_MSI_NAME)
+    for name in ("README.md", "LICENSE", "LICENSE-MIT", "LICENSE-APACHE"):
+        p = ROOT / name
+        if p.is_file():
+            shutil.copy2(p, stage / name)
+    readme_host = stage / "HOST-README.txt"
+    readme_host.write_text(
+        "DeckLink Host (Windows)\n"
+        "=======================\n\n"
+        "1. Extract this zip anywhere.\n"
+        "2. Run decklink-host.exe\n"
+        "3. On first launch, approve UAC to install ViGEmBus "
+        f"({VIGEM_MSI_NAME} is included).\n"
+        "4. Allow firewall UDP 31415 if prompted.\n"
+        "5. On the Steam Deck open DeckLink and tap Connect "
+        "(no IP needed).\n\n"
+        "ViGEmBus is GPL-3 (Nefarius): https://github.com/nefarius/ViGEmBus\n",
+        encoding="utf-8",
+    )
+
+    if HOST_ZIP.exists():
+        HOST_ZIP.unlink()
+    with zipfile.ZipFile(HOST_ZIP, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(stage.rglob("*")):
+            if path.is_file():
+                zf.write(path, arcname=f"{HOST_STAGE_NAME}/{path.relative_to(stage).as_posix()}")
+    emit(STATUS="built_host", ARTIFACT=str(HOST_ZIP), BYTES=HOST_ZIP.stat().st_size)
+    return HOST_ZIP
+
+
 def default_notes(version: str) -> str:
     return f"""## DeckLink v{version}
 
-Steam Deck as a Wi-Fi gamepad / keyboard+mouse for Windows (ViGEmBus host).
+Steam Deck as a Wi-Fi Xbox controller / keyboard+mouse for Windows.
 
 ### Install
-1. **PC:** Install ViGEmBus, run `decklink-host.exe` (UDP 31415)
+1. **PC:** Download `{HOST_ZIP_NAME}`, extract, run `decklink-host.exe`
+   - ViGEmBus MSI is bundled; first launch installs it (UAC)
+   - Allow firewall UDP **31415** if prompted
 2. **Deck:** Download `{TARBALL_NAME}`, extract, `bash scripts/install-deck.sh ./{TARBALL_NAME}`
-3. Open **DeckLink**, enter PC LAN IP, Connect
+3. Open **DeckLink** → **Connect** (auto-discovers the PC — no IP)
 
 Same release tag is reused; assets are replaced on every publish. Version is not bumped automatically.
 """
 
 
-def publish_release(tag: str, tarball: Path, version: str) -> None:
+def publish_release(tag: str, artifacts: list[Path], version: str) -> None:
     title = f"DeckLink v{version}"
     notes = default_notes(version)
     if release_exists(tag):
-        r = run(
-            ["gh", "release", "upload", tag, str(tarball), "--clobber"],
-            check=False,
-        )
-        if r.returncode != 0:
-            die((r.stderr or r.stdout or "gh release upload failed").strip())
+        for art in artifacts:
+            r = run(
+                ["gh", "release", "upload", tag, str(art), "--clobber"],
+                check=False,
+            )
+            if r.returncode != 0:
+                die((r.stderr or r.stdout or f"gh upload {art.name} failed").strip())
         run(
             [
                 "gh",
@@ -227,24 +307,22 @@ def publish_release(tag: str, tarball: Path, version: str) -> None:
             check=False,
         )
     else:
-        r = run(
-            [
-                "gh",
-                "release",
-                "create",
-                tag,
-                str(tarball),
-                "--title",
-                title,
-                "--notes",
-                notes,
-                "--latest",
-            ],
-            check=False,
-        )
+        cmd = [
+            "gh",
+            "release",
+            "create",
+            tag,
+            *[str(a) for a in artifacts],
+            "--title",
+            title,
+            "--notes",
+            notes,
+            "--latest",
+        ]
+        r = run(cmd, check=False)
         if r.returncode != 0:
             die((r.stderr or r.stdout or "gh release create failed").strip())
-    emit(STATUS="uploaded", TAG=tag)
+    emit(STATUS="uploaded", TAG=tag, ASSETS=",".join(a.name for a in artifacts))
 
 
 def parse_args() -> argparse.Namespace:
@@ -285,14 +363,21 @@ def main() -> None:
         emit(STATUS="dry_run", ACTION=f"would build locally and replace {tag}")
         return
 
+    artifacts: list[Path] = []
     if args.skip_build:
         if not TARBALL.is_file():
-            die("artifacts missing; run without --skip-build")
-        tarball = TARBALL
+            die("Linux tarball missing; run without --skip-build")
+        if not HOST_ZIP.is_file():
+            die("Windows host zip missing; run without --skip-build")
+        artifacts = [TARBALL, HOST_ZIP]
     else:
-        tarball = build_linux_tarball()
+        artifacts.append(build_linux_tarball())
+        if os.name == "nt":
+            artifacts.append(build_windows_host_zip())
+        else:
+            emit(STATUS="note", MESSAGE="skip Windows host zip (not on Windows)")
 
-    publish_release(tag, tarball, version)
+    publish_release(tag, artifacts, version)
 
     sha = run(["git", "rev-parse", "HEAD"], check=False)
     head = (sha.stdout or "").strip() if sha.returncode == 0 else ""
@@ -304,12 +389,14 @@ def main() -> None:
         ["gh", "release", "view", tag, "--json", "url", "-q", ".url"],
         check=False,
     )
+    base = "https://github.com/bastianjosekottekudy-cmyk/DeckLink-BT/releases/latest/download"
     emit(
         STATUS="ok",
         RELEASE_URL=(url_r.stdout or "").strip(),
         TAG=tag,
         VERSION=version,
-        TARBALL=f"https://github.com/bastianjosekottekudy-cmyk/DeckLink-BT/releases/latest/download/{TARBALL_NAME}",
+        TARBALL=f"{base}/{TARBALL_NAME}",
+        HOST_ZIP=f"{base}/{HOST_ZIP_NAME}",
     )
 
 

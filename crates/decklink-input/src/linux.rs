@@ -115,32 +115,15 @@ fn device_has_rel_x(dev: &Device) -> bool {
         .is_some_and(|a| a.contains(RelativeAxisCode::REL_X))
 }
 
-/// Grab gamepad/stick nodes so they do not drive Desktop while linked.
-/// Never silence Deck trackpads / Steam mouse — those stay for the Deck itself.
+/// Grab gamepad + Deck trackpad/mouse nodes while linked so input goes to the PC.
 fn should_silence(name: &str, dev: Option<&Device>) -> bool {
-    let lower = name.to_ascii_lowercase();
-    if score_trackpad(name) > 0
-        || lower.contains("touchpad")
-        || lower.contains("trackpad")
-        || ((lower.contains("steam") || lower.contains("valve") || lower.contains("deck"))
-            && lower.contains("mouse"))
-    {
-        return false;
-    }
-    if score_gamepad(name) > 0 {
+    if score_local_pointer(name) > 0 || score_gamepad(name) > 0 || score_trackpad(name) > 0 {
         return true;
     }
-    if score_local_pointer(name) > 0 {
-        return true;
-    }
-    // Catch unnamed uinput stick pointers — not pad mice.
     if let Some(d) = dev {
         if device_has_rel_x(d) {
-            if !lower.contains("decklink")
-                && !lower.contains("touchpad")
-                && !lower.contains("trackpad")
-                && !lower.contains("mouse")
-            {
+            let lower = name.to_ascii_lowercase();
+            if !lower.contains("decklink") {
                 return true;
             }
         }

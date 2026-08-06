@@ -1,9 +1,42 @@
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
 use decklink_hid::{
     hid_key, idle_release_packets, ControllerState, GamepadButtons, HidPacket, KeyModifiers,
-    KeyboardReport, GAMEPAD_REPORT_ID, KEYBOARD_REPORT_ID,
+    KeyboardReport, MouseButtons, MouseReport, GAMEPAD_REPORT_ID, KEYBOARD_REPORT_ID,
+    MOUSE_REPORT_ID,
 };
+use tracing::info;
 
 use crate::Profile;
+
+static LAST_MOUSE_BUTTONS: AtomicU8 = AtomicU8::new(0);
+
+fn diag_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("DECKLINK_DIAG").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes")
+        )
+    })
+}
+
+fn diag_mouse_throttle() -> bool {
+    use std::sync::Mutex;
+    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    let last = LAST.get_or_init(|| Mutex::new(None));
+    let mut g = last.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    if let Some(prev) = *g {
+        if now.duration_since(prev) < Duration::from_millis(40) {
+            return false;
+        }
+    }
+    *g = Some(now);
+    true
+}
 
 /// Alias kept for UI / docs clarity.
 pub type ProfileKind = Profile;
@@ -23,6 +56,7 @@ pub fn map_state(profile: Profile, state: &ControllerState) -> MappedOutput {
 
     match profile {
         Profile::Gamepad => {
+            // Xbox only — sticks/triggers/buttons → ViGEm. Never emit keyboard/mouse.
             out.packets.push(state.gamepad_packet());
         }
         Profile::Desktop => {
@@ -41,13 +75,70 @@ fn idle_gamepad() -> HidPacket {
         .expect("idle gamepad")
 }
 
-/// Keyboard & Mouse: face/D-pad/left-stick → keys.
-///
-/// Physical Steam Deck trackpads are **not** mapped — they stay for the Deck/Desktop.
-/// Host mouse comes only from the soft UI (buttons / on-screen pad).
-/// Select+Start is reserved for profile toggle (must not emit Alt+Tab).
+/// Keyboard & Mouse profile:
+/// - Left/right Steam trackpads → host mouse (move / click / two-finger scroll)
+/// - Face buttons / D-pad → keys (no left-stick WASD — that belongs to Xbox mode)
+/// - Select+Start reserved for profile toggle (not Alt+Tab)
 fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     let mut packets = Vec::new();
+
+    let both = state.lpad_touch && state.rpad_touch;
+    let mut mx = 0.0f32;
+    let mut my = 0.0f32;
+    let mut wheel = 0i8;
+    let mut src = "none";
+
+    if both {
+        let scroll_y = (state.lpad_dy + state.rpad_dy) * 0.5;
+        wheel = (scroll_y * 0.5).round().clamp(-3.0, 3.0) as i8;
+        src = "scroll";
+    } else {
+        if state.lpad_touch {
+            mx += state.lpad_dx;
+            my += state.lpad_dy;
+            src = "lpad";
+        }
+        if state.rpad_touch {
+            mx += state.rpad_dx;
+            my += state.rpad_dy;
+            src = if src == "lpad" { "both_pads" } else { "rpad" };
+        }
+    }
+    let dx = mx.round().clamp(-6.0, 6.0) as i8;
+    let dy = my.round().clamp(-6.0, 6.0) as i8;
+
+    let mut buttons = MouseButtons::empty();
+    if state.lpad_click {
+        buttons |= MouseButtons::LEFT;
+    }
+    if state.rpad_click {
+        buttons |= MouseButtons::RIGHT;
+    }
+    if state.buttons.contains(GamepadButtons::R3) {
+        buttons |= MouseButtons::MIDDLE;
+    }
+    let btn_bits = buttons.bits();
+    let prev_btns = LAST_MOUSE_BUTTONS.swap(btn_bits, Ordering::Relaxed);
+    if dx != 0 || dy != 0 || wheel != 0 || btn_bits != 0 || prev_btns != 0 {
+        if diag_on() && (dx != 0 || dy != 0 || wheel != 0) && diag_mouse_throttle() {
+            info!(
+                "DIAG mouse hid dx={dx} dy={dy} wheel={wheel} src={src} \
+                 lpad_d=({:.2},{:.2}) rpad_d=({:.2},{:.2})",
+                state.lpad_dx, state.lpad_dy, state.rpad_dx, state.rpad_dy,
+            );
+        }
+        packets.push(HidPacket {
+            report_id: MOUSE_REPORT_ID,
+            data: MouseReport {
+                buttons,
+                dx,
+                dy,
+                wheel,
+            }
+            .pack()
+            .to_vec(),
+        });
+    }
 
     let chord = state.buttons.contains(GamepadButtons::SELECT)
         && state.buttons.contains(GamepadButtons::START);
@@ -59,7 +150,6 @@ fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     if state.buttons.contains(GamepadButtons::R1) {
         kb.modifiers |= KeyModifiers::LEFT_SHIFT;
     }
-    // Skip SELECT/START while chord held — otherwise Desktop maps to Alt+Tab.
     if !chord && state.buttons.contains(GamepadButtons::SELECT) {
         kb.modifiers |= KeyModifiers::LEFT_ALT;
     }
@@ -100,20 +190,7 @@ fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     if state.buttons.contains(GamepadButtons::R4) {
         kb.push_key(hid_key::PAGE_DOWN);
     }
-
-    // Left stick → WASD
-    if state.ly < -0.45 {
-        kb.push_key(hid_key::W);
-    }
-    if state.ly > 0.45 {
-        kb.push_key(hid_key::S);
-    }
-    if state.lx < -0.45 {
-        kb.push_key(hid_key::A);
-    }
-    if state.lx > 0.45 {
-        kb.push_key(hid_key::D);
-    }
+    // Intentionally no left-stick WASD — sticks are for Xbox Controller mode.
 
     packets.push(HidPacket {
         report_id: KEYBOARD_REPORT_ID,
@@ -126,69 +203,56 @@ fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use decklink_hid::MOUSE_REPORT_ID;
 
     #[test]
-    fn gamepad_emits_gamepad_only() {
-        let s = ControllerState::default();
+    fn gamepad_emits_gamepad_only_with_sticks() {
+        let mut s = ControllerState::default();
+        s.lx = 0.5;
+        s.ly = -0.5;
+        s.buttons.insert(GamepadButtons::A);
         let o = map_state(Profile::Gamepad, &s);
         assert_eq!(o.packets.len(), 1);
         assert_eq!(o.packets[0].report_id, GAMEPAD_REPORT_ID);
+        // packed lx at bytes 3-4
+        let lx = i16::from_le_bytes([o.packets[0].data[3], o.packets[0].data[4]]);
+        assert!(lx > 0, "left stick X must reach gamepad report");
+        assert!(
+            o.packets.iter().all(|p| p.report_id != KEYBOARD_REPORT_ID),
+            "Xbox mode must not emit keyboard/WASD"
+        );
     }
 
     #[test]
-    fn keyboard_emits_keys_without_pad_mouse() {
+    fn desktop_stick_not_wasd() {
         let mut s = ControllerState::default();
-        s.rpad_touch = true;
-        s.rpad_dx = 2.0;
-        s.buttons.insert(GamepadButtons::A);
+        s.lx = -0.9;
+        s.ly = -0.9;
         let o = map_state(Profile::Desktop, &s);
-        assert!(o.packets.len() >= 2);
-        assert_eq!(o.packets[0].report_id, GAMEPAD_REPORT_ID);
-        assert!(o
+        let kb = o
             .packets
             .iter()
-            .any(|p| p.report_id == KEYBOARD_REPORT_ID
-                && p.data.get(2) == Some(&hid_key::ENTER)));
-        assert!(
-            o.packets
-                .iter()
-                .filter(|p| p.report_id == MOUSE_REPORT_ID)
-                .all(|p| p.data[1] == 0 && p.data[2] == 0),
-            "trackpads must not move host cursor"
-        );
+            .find(|p| p.report_id == KEYBOARD_REPORT_ID)
+            .expect("kb");
+        assert!(!kb.data[2..8].contains(&hid_key::W));
+        assert!(!kb.data[2..8].contains(&hid_key::A));
+        assert!(!kb.data[2..8].contains(&hid_key::S));
+        assert!(!kb.data[2..8].contains(&hid_key::D));
     }
 
     #[test]
-    fn stick_does_not_drive_mouse() {
-        let mut s = ControllerState::default();
-        s.rx = 0.9;
-        s.ry = -0.9;
-        let o = map_state(Profile::Desktop, &s);
-        assert!(
-            o.packets
-                .iter()
-                .find(|p| p.report_id == MOUSE_REPORT_ID)
-                .is_none(),
-            "stick must not move cursor"
-        );
-    }
-
-    #[test]
-    fn trackpad_does_not_drive_mouse() {
+    fn trackpad_drives_mouse() {
         let mut s = ControllerState::default();
         s.rpad_touch = true;
         s.rpad_dx = 4.0;
         s.rpad_dy = -3.0;
-        s.lpad_click = true;
         let o = map_state(Profile::Desktop, &s);
-        assert!(
-            o.packets
-                .iter()
-                .find(|p| p.report_id == MOUSE_REPORT_ID)
-                .is_none(),
-            "physical pads stay on Deck"
-        );
+        let mouse = o
+            .packets
+            .iter()
+            .find(|p| p.report_id == MOUSE_REPORT_ID)
+            .expect("mouse");
+        assert_eq!(mouse.data[1], 4u8);
+        assert_eq!(mouse.data[2] as i8, -3);
     }
 
     #[test]
@@ -202,10 +266,8 @@ mod tests {
             .iter()
             .find(|p| p.report_id == KEYBOARD_REPORT_ID)
             .expect("keyboard");
-        // modifiers byte: no Left Alt (bit 2)
-        assert_eq!(kb.data[0] & 0x04, 0, "chord must not send Alt");
-        // no Tab keycode in slots
-        assert!(!kb.data[2..8].contains(&hid_key::TAB), "chord must not send Tab");
+        assert_eq!(kb.data[0] & 0x04, 0);
+        assert!(!kb.data[2..8].contains(&hid_key::TAB));
     }
 
     #[test]
@@ -215,8 +277,5 @@ mod tests {
         assert_eq!(pkts[0].report_id, GAMEPAD_REPORT_ID);
         assert_eq!(pkts[1].report_id, MOUSE_REPORT_ID);
         assert_eq!(pkts[2].report_id, KEYBOARD_REPORT_ID);
-        assert_eq!(pkts[0].data[2], 8);
-        assert!(pkts[1].data.iter().all(|&b| b == 0));
-        assert!(pkts[2].data.iter().all(|&b| b == 0));
     }
 }

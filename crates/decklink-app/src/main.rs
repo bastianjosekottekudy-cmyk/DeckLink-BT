@@ -171,7 +171,7 @@ async fn main() -> Result<()> {
         connect_gen: 0,
         peer_name: "—".into(),
         status: format!(
-            "Ready v{} — enter PC IP, Connect. PC needs decklink-host + ViGEmBus.",
+            "Ready v{} — start decklink-host on the PC, then Connect (auto Wi‑Fi find).",
             env!("CARGO_PKG_VERSION")
         ),
         sticky_mods: 0,
@@ -207,26 +207,36 @@ async fn main() -> Result<()> {
 }
 
 async fn ensure_connected(shared: &Arc<Mutex<Shared>>) -> Result<()> {
-    let (host, name, gen) = {
+    let (prefer, name, gen) = {
         let mut g = shared.lock().unwrap();
         if g.link.is_some() || g.connecting {
             return Ok(());
-        }
-        let host = g.store.config.host_addr.trim().to_string();
-        if host.is_empty() {
-            g.status = "Set PC IP first (e.g. 192.168.1.20)".into();
-            anyhow::bail!("no host_addr");
         }
         g.connect_gen = g.connect_gen.wrapping_add(1);
         let gen = g.connect_gen;
         g.connecting = true;
         g.linking = true;
-        g.status = format!("Connecting to {host}…");
-        (host, g.store.config.device_name.clone(), gen)
+        g.status = "Searching for PC on Wi‑Fi…".into();
+        (
+            g.store.config.host_addr.trim().to_string(),
+            g.store.config.device_name.clone(),
+            gen,
+        )
     };
     sync_input_grab(shared);
 
-    let join = tokio::task::spawn_blocking(move || NetClient::connect(&host, &name)).await;
+    let join = tokio::task::spawn_blocking(move || {
+        // Prefer LAN discovery (no manual IP). Fall back to saved address if set.
+        match NetClient::connect_auto(&name) {
+            Ok(c) => Ok(c),
+            Err(e) if !prefer.is_empty() => {
+                tracing::warn!("discover failed ({e}); trying saved {prefer}");
+                NetClient::connect(&prefer, &name)
+            }
+            Err(e) => Err(e),
+        }
+    })
+    .await;
     let result = match join {
         Ok(r) => r,
         Err(e) => {
@@ -262,7 +272,8 @@ async fn ensure_connected(shared: &Arc<Mutex<Shared>>) -> Result<()> {
                 g.linking = true;
                 g.connected = true;
                 g.peer_name = peer_name.clone();
-                g.status = format!("Linked to {peer_name} ({peer}) — Steam frozen");
+                g.status = format!("Linked to {peer_name} — use Xbox or Keyboard+Mouse tab");
+                g.store.config.host_addr = peer.clone();
                 g.link = Some(client);
                 g.last_heartbeat = std::time::Instant::now();
                 let now = SystemTime::now()
@@ -510,7 +521,6 @@ fn run_ui(shared: Arc<Mutex<Shared>>, mut input_rx: mpsc::Receiver<InputEvent>) 
         ui.set_selected_profile(index_from_profile(g.store.config.active_profile));
         ui.set_targets_text(format_targets(&g.store.config.paired_targets).into());
         ui.set_status_text(g.status.clone().into());
-        ui.set_host_addr(g.store.config.host_addr.clone().into());
         ui.set_battery_pct(100);
         ui.set_sticky_mods(g.sticky_mods as i32);
     }
@@ -527,12 +537,6 @@ fn run_ui(shared: Arc<Mutex<Shared>>, mut input_rx: mpsc::Receiver<InputEvent>) 
         let tx = cmd_tx.clone();
         ui.on_stop_connect(move || {
             let _ = tx.send(UiCommand::Disconnect);
-        });
-    }
-    {
-        let tx = cmd_tx.clone();
-        ui.on_host_addr_edited(move |s| {
-            let _ = tx.send(UiCommand::SetHost(s.to_string()));
         });
     }
     {
@@ -613,11 +617,6 @@ fn run_ui(shared: Arc<Mutex<Shared>>, mut input_rx: mpsc::Receiver<InputEvent>) 
                             UiCommand::Disconnect => {
                                 stop_link(&shared_bg).await;
                             }
-                            UiCommand::SetHost(s) => {
-                                let mut g = shared_bg.lock().unwrap();
-                                g.store.config.host_addr = s;
-                                let _ = g.store.save();
-                            }
                             UiCommand::SetProfile(idx) => {
                                 apply_profile_switch(&shared_bg, Some(profile_from_index(idx)))
                                     .await;
@@ -676,7 +675,6 @@ fn run_ui(shared: Arc<Mutex<Shared>>, mut input_rx: mpsc::Receiver<InputEvent>) 
 enum UiCommand {
     Connect,
     Disconnect,
-    SetHost(String),
     SetProfile(i32),
     KeyTap(u8),
     ModToggle(u8),
@@ -833,7 +831,6 @@ fn push_ui(
             format_targets(&g.store.config.paired_targets),
             index_from_profile(g.store.config.active_profile),
             g.sticky_mods as i32,
-            g.store.config.host_addr.clone(),
         )
     };
     let ui_weak = ui_weak.clone();
@@ -847,7 +844,6 @@ fn push_ui(
             ui.set_targets_text(snapshot.5.into());
             ui.set_selected_profile(snapshot.6);
             ui.set_sticky_mods(snapshot.7);
-            ui.set_host_addr(snapshot.8.into());
         }
     });
 }
