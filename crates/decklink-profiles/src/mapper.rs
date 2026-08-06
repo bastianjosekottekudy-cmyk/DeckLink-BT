@@ -80,11 +80,12 @@ fn idle_gamepad() -> HidPacket {
         .expect("idle gamepad")
 }
 
-/// Keyboard & Mouse: Deck trackpads + right stick; face/D-pad/left-stick → keys.
+/// Keyboard & Mouse: Deck trackpads only; face/D-pad/left-stick → keys.
 ///
 /// - Either pad alone → move cursor
 /// - Left pad click → left mouse button; right pad click → right mouse button
 /// - Both pads touched together → vertical scroll (no cursor move)
+/// - Right stick is NOT mouse (resting bias was a footgun; pads are the pointer)
 fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     let mut packets = Vec::new();
 
@@ -97,7 +98,7 @@ fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     if both {
         // Two-finger scroll: average vertical motion from both pads.
         let scroll_y = (state.lpad_dy + state.rpad_dy) * 0.5;
-        wheel = (scroll_y * 0.35).round().clamp(-7.0, 7.0) as i8;
+        wheel = (scroll_y * 0.5).round().clamp(-3.0, 3.0) as i8;
         src = "scroll";
     } else {
         if state.lpad_touch {
@@ -110,20 +111,9 @@ fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
             my += state.rpad_dy;
             src = if src == "lpad" { "both_pads" } else { "rpad" };
         }
-        if !state.lpad_touch && !state.rpad_touch {
-            const STICK_DZ: f32 = 0.45;
-            if state.rx.abs() > STICK_DZ {
-                mx += (state.rx.signum() * (state.rx.abs() - STICK_DZ)) * 8.0;
-                src = "stick";
-            }
-            if state.ry.abs() > STICK_DZ {
-                my += (state.ry.signum() * (state.ry.abs() - STICK_DZ)) * 8.0;
-                src = "stick";
-            }
-        }
     }
-    let dx = mx.round().clamp(-20.0, 20.0) as i8;
-    let dy = my.round().clamp(-20.0, 20.0) as i8;
+    let dx = mx.round().clamp(-6.0, 6.0) as i8;
+    let dy = my.round().clamp(-6.0, 6.0) as i8;
 
     let mut buttons = MouseButtons::empty();
     if state.lpad_click {
@@ -253,7 +243,8 @@ mod tests {
     #[test]
     fn keyboard_mouse_emits_gamepad_and_keyboard() {
         let mut s = ControllerState::default();
-        s.rx = 0.9; // past mouse deadzone
+        s.rpad_touch = true;
+        s.rpad_dx = 2.0;
         s.buttons.insert(GamepadButtons::A);
         let o = map_state(Profile::Desktop, &s);
         assert!(o.packets.len() >= 2);
@@ -264,6 +255,15 @@ mod tests {
             .any(|p| p.report_id == KEYBOARD_REPORT_ID
                 && p.data.get(2) == Some(&hid_key::ENTER)));
         assert!(o.packets.iter().any(|p| p.report_id == MOUSE_REPORT_ID));
+    }
+
+    #[test]
+    fn stick_does_not_drive_mouse() {
+        let mut s = ControllerState::default();
+        s.rx = 0.9;
+        s.ry = -0.9;
+        let o = map_state(Profile::Desktop, &s);
+        assert!(!o.packets.iter().any(|p| p.report_id == MOUSE_REPORT_ID));
     }
 
     #[test]
