@@ -40,6 +40,10 @@ struct Cli {
     /// Override BLE local name
     #[arg(long)]
     name: Option<String>,
+
+    /// Verbose mouse/pad/BT diagnostics → ~/.local/share/decklink-bt/decklink.log
+    #[arg(long)]
+    diag: bool,
 }
 
 struct Shared {
@@ -74,8 +78,22 @@ fn sync_input_grab(shared: &Arc<Mutex<Shared>>) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    // Set before any OnceLock diag checks in other crates.
+    if cli.diag {
+        std::env::set_var("DECKLINK_DIAG", "1");
+    }
+    let diag = matches!(
+        std::env::var("DECKLINK_DIAG").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    );
+
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        "decklink_bt=info,decklink_app=info,decklink_input=info".into()
+        if diag {
+            "decklink_bt=info,decklink_app=info,decklink_input=info,decklink_profiles=info".into()
+        } else {
+            "decklink_bt=info,decklink_app=info,decklink_input=info".into()
+        }
     });
     if let Some(dir) = dirs::data_local_dir() {
         let log_dir = dir.join("decklink-bt");
@@ -102,12 +120,17 @@ async fn main() -> Result<()> {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
 
+    if diag {
+        info!(
+            "DIAG capture ON — pad/stick/mouse/BT lines tagged DIAG; \
+             log: ~/.local/share/decklink-bt/decklink.log"
+        );
+    }
+
     // One process only — two instances fight over EVIOCGRAB (EBUSY) and break silence.
     let _instance_lock = acquire_instance_lock().context(
         "DeckLink BT is already running — close the other window/shortcut and try again",
     )?;
-
-    let cli = Cli::parse();
 
     if !cli.headless {
         if std::env::var_os("WINIT_UNIX_BACKEND").is_none() {
@@ -640,6 +663,12 @@ async fn soft_mouse_move(shared: &Arc<Mutex<Shared>>, dx: f32, dy: f32) {
     // Steam lizard often drags the Deck cursor across this UI widget and injects
     // huge deltas — that pins the host pointer in a corner. Reject jumps.
     if !dx.is_finite() || !dy.is_finite() || dx.abs() > 24.0 || dy.abs() > 24.0 {
+        if matches!(
+            std::env::var("DECKLINK_DIAG").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes")
+        ) {
+            warn!("DIAG soft_mouse REJECT dx={dx} dy={dy}");
+        }
         return;
     }
     let buttons = {
@@ -650,6 +679,12 @@ async fn soft_mouse_move(shared: &Arc<Mutex<Shared>>, dx: f32, dy: f32) {
     let sy = dy.round().clamp(-12.0, 12.0) as i8;
     if sx == 0 && sy == 0 {
         return;
+    }
+    if matches!(
+        std::env::var("DECKLINK_DIAG").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    ) {
+        info!("DIAG soft_mouse UI dx={sx} dy={sy}");
     }
     let r = MouseReport {
         buttons: MouseButtons::from_bits_truncate(buttons),

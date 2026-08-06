@@ -1,8 +1,9 @@
 //! BlueZ HOGP GATT server via bluer.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use bluer::adv::{Advertisement, Type as AdvType};
 use bluer::Adapter;
@@ -20,6 +21,16 @@ use tracing::{info, warn};
 use decklink_hid::{HidPacket, APPEARANCE_GAMEPAD, HID_REPORT_MAP};
 
 use crate::{BtError, BtEvent, HogpServer};
+
+fn diag_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("DECKLINK_DIAG").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes")
+        )
+    })
+}
 
 /// Bluetooth SIG 16-bit UUID → full 128-bit UUID (const-safe).
 const fn uuid16(u: u16) -> Uuid {
@@ -133,7 +144,10 @@ fn input_report_characteristic(
                             }
                         }
                     }
-                    info!("HID input report {report_id} notification session ended");
+                    info!(
+                        "DIAG HID report {report_id} notify session ended \
+                         (host unsubscribed or link dropped)"
+                    );
                 })
             })),
             ..Default::default()
@@ -562,6 +576,8 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
     let n2c = notifiers2.clone();
     let n3c = notifiers3.clone();
     let announced_watch = hid_host_announced.clone();
+    let peer_watchers = Arc::new(AtomicUsize::new(0));
+    let peer_watchers_ev = peer_watchers.clone();
     tokio::spawn(async move {
         while let Some(evt) = device_events.next().await {
             match evt {
@@ -585,12 +601,35 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                             let addr_s = addr.to_string();
                             let restart_adv = restart_adv.clone();
                             let adapter_watch = adapter2.clone();
+                            let peer_watchers = peer_watchers_ev.clone();
+                            let watcher_id = peer_watchers.fetch_add(1, Ordering::SeqCst) + 1;
+                            let c1 = n1c.lock().await.len();
+                            let c2 = n2c.lock().await.len();
+                            let c3 = n3c.lock().await.len();
+                            let already = announced_watch.load(Ordering::SeqCst);
+                            info!(
+                                "DIAG BT DeviceAdded connected peer={name} ({addr_s}) \
+                                 watcher=#{watcher_id} active_watchers={} \
+                                 notifiers_already g={c1} m={c2} k={c3} announced={already}",
+                                peer_watchers.load(Ordering::SeqCst)
+                            );
+                            if c1 + c2 + c3 > 0 && !already {
+                                warn!(
+                                    "DIAG BT stale notifiers at connect (g={c1} m={c2} k={c3}) — \
+                                     CCCD detection may false-positive"
+                                );
+                            }
                             tokio::spawn(async move {
                                 // Wait for HID CCCDs (pairing can take a while).
                                 let mut got_hid = false;
                                 for i in 0..60 {
                                     if announced_watch.load(Ordering::SeqCst) {
                                         got_hid = true;
+                                        info!(
+                                            "DIAG BT watcher#{watcher_id} saw announced=true \
+                                             after ~{}ms",
+                                            (i + 1) * 500
+                                        );
                                         break;
                                     }
                                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -603,6 +642,12 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                                              (gamepad={c1} mouse={c2} keyboard={c3})",
                                             (i + 1) * 500
                                         );
+                                        if diag_on() {
+                                            info!(
+                                                "DIAG BT watcher#{watcher_id} CCCD via notifier \
+                                                 counts (may be stale from prior session)"
+                                            );
+                                        }
                                         got_hid = true;
                                         break;
                                     }
@@ -612,10 +657,18 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                                         "BT peer {name} ({addr_s}) connected without HID — \
                                          disconnecting so Windows can reconnect cleanly"
                                     );
+                                    info!(
+                                        "DIAG BT watcher#{watcher_id} force-disconnect \
+                                         (no CCCD in ~30s) notifiers g={} m={} k={}",
+                                        n1c.lock().await.len(),
+                                        n2c.lock().await.len(),
+                                        n3c.lock().await.len()
+                                    );
                                     if let Ok(d) = adapter_watch.device(addr) {
                                         let _ = d.disconnect().await;
                                     }
                                     announced_watch.store(false, Ordering::SeqCst);
+                                    peer_watchers.fetch_sub(1, Ordering::SeqCst);
                                     restart_adv().await;
                                     return;
                                 }
@@ -632,12 +685,21 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                                             "host {name} ({addr_s}) disconnected — \
                                              re-advertising for next connect"
                                         );
+                                        let c1 = n1c.lock().await.len();
+                                        let c2 = n2c.lock().await.len();
+                                        let c3 = n3c.lock().await.len();
+                                        info!(
+                                            "DIAG BT watcher#{watcher_id} disconnect \
+                                             notifiers_still g={c1} m={c2} k={c3} \
+                                             (uncleared until session ends)"
+                                        );
                                         announced_watch.store(false, Ordering::SeqCst);
                                         let _ = event_tx2
                                             .send(BtEvent::Disconnected {
                                                 address: addr_s.clone(),
                                             })
                                             .await;
+                                        peer_watchers.fetch_sub(1, Ordering::SeqCst);
                                         restart_adv().await;
                                         break;
                                     }
@@ -647,6 +709,10 @@ pub async fn start_hogp(device_name: String) -> Result<HogpServer, BtError> {
                     }
                 }
                 AdapterEvent::DeviceRemoved(addr) => {
+                    info!(
+                        "DIAG BT DeviceRemoved {addr} active_watchers={}",
+                        peer_watchers_ev.load(Ordering::SeqCst)
+                    );
                     let _ = event_tx2
                         .send(BtEvent::Disconnected {
                             address: addr.to_string(),

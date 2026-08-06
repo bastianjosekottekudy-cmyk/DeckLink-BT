@@ -195,7 +195,7 @@ Version=1.0
 Type=Application
 Name=DeckLink BT
 Comment=Steam Deck as a BLE gamepad / keyboard+mouse
-Exec=env WINIT_UNIX_BACKEND=x11 SLINT_BACKEND=winit ${LAUNCH} --advertise
+Exec=env DECKLINK_DIAG=1 WINIT_UNIX_BACKEND=x11 SLINT_BACKEND=winit ${LAUNCH} --advertise --diag
 Icon=input-gaming
 Terminal=false
 Categories=Game;Utility;

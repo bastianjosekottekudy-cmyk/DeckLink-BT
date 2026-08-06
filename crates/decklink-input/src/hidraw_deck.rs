@@ -6,12 +6,40 @@ use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use decklink_hid::{ControllerState, GamepadButtons};
 use tracing::{info, warn};
 
 use crate::lizard::{self, LizardGuard};
+
+/// Temporary capture: `DECKLINK_DIAG=1` or `--diag` (sets the env from main).
+fn diag_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("DECKLINK_DIAG").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes")
+        )
+    })
+}
+
+fn diag_throttle(slot: usize, min_ms: u64) -> bool {
+    use std::sync::Mutex;
+    static LAST: OnceLock<Mutex<[Option<Instant>; 3]>> = OnceLock::new();
+    let last = LAST.get_or_init(|| Mutex::new([None, None, None]));
+    let mut g = last.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    if let Some(prev) = g[slot] {
+        if now.duration_since(prev) < Duration::from_millis(min_ms) {
+            return false;
+        }
+    }
+    g[slot] = Some(now);
+    true
+}
 
 const VID_VALVE: u16 = 0x28DE;
 const PID_STEAM_DECK: u16 = 0x1205;
@@ -335,15 +363,55 @@ fn apply_deck_report(
     state.rpad_dx = 0.0;
     state.rpad_dy = 0.0;
 
+    let lx = i16_le(data, 16) as i32;
+    let ly = i16_le(data, 18) as i32;
+    let rx = i16_le(data, 20) as i32;
+    let ry = i16_le(data, 22) as i32;
+
+    // Touch edges (always when DIAG) — catch abs jump on touch-down / lift.
+    if diag_on() {
+        static PREV_L: AtomicBool = AtomicBool::new(false);
+        static PREV_R: AtomicBool = AtomicBool::new(false);
+        let was_l = PREV_L.swap(state.lpad_touch, Ordering::Relaxed);
+        let was_r = PREV_R.swap(state.rpad_touch, Ordering::Relaxed);
+        if state.lpad_touch && !was_l {
+            info!(
+                "DIAG pad L TOUCH_DOWN raw=({lx},{ly}) click={} stick=({:.3},{:.3})",
+                state.lpad_click, state.rx, state.ry
+            );
+        } else if !state.lpad_touch && was_l {
+            info!("DIAG pad L TOUCH_UP last={:?}", pad_last.0);
+        }
+        if state.rpad_touch && !was_r {
+            info!(
+                "DIAG pad R TOUCH_DOWN raw=({rx},{ry}) click={} stick=({:.3},{:.3})",
+                state.rpad_click, state.rx, state.ry
+            );
+        } else if !state.rpad_touch && was_r {
+            info!("DIAG pad R TOUCH_UP last={:?}", pad_last.1);
+        }
+    }
+
     if state.lpad_touch {
-        let x = i16_le(data, 16) as i32;
-        let y = i16_le(data, 18) as i32;
+        let x = lx;
+        let y = ly;
         if let Some((px, py)) = pad_last.0 {
             let dx = (x - px) as f32;
             let dy = (py - y) as f32;
             if dx.abs() < 800.0 && dy.abs() < 800.0 {
                 state.lpad_dx = (dx * 0.06).clamp(-20.0, 20.0);
                 state.lpad_dy = (dy * 0.06).clamp(-20.0, 20.0);
+            } else if diag_on() && diag_throttle(0, 20) {
+                info!("DIAG pad L DROP raw_d=({dx:.0},{dy:.0}) abs=({x},{y}) prev=({px},{py})");
+            }
+            if diag_on()
+                && (state.lpad_dx != 0.0 || state.lpad_dy != 0.0)
+                && diag_throttle(1, 40)
+            {
+                info!(
+                    "DIAG pad L abs=({x},{y}) raw_d=({dx:.0},{dy:.0}) out=({:.2},{:.2})",
+                    state.lpad_dx, state.lpad_dy
+                );
             }
         }
         pad_last.0 = Some((x, y));
@@ -352,18 +420,42 @@ fn apply_deck_report(
     }
 
     if state.rpad_touch {
-        let x = i16_le(data, 20) as i32;
-        let y = i16_le(data, 22) as i32;
+        let x = rx;
+        let y = ry;
         if let Some((px, py)) = pad_last.1 {
             let dx = (x - px) as f32;
             let dy = (py - y) as f32;
             if dx.abs() < 800.0 && dy.abs() < 800.0 {
                 state.rpad_dx = (dx * 0.06).clamp(-20.0, 20.0);
                 state.rpad_dy = (dy * 0.06).clamp(-20.0, 20.0);
+            } else if diag_on() && diag_throttle(0, 20) {
+                info!("DIAG pad R DROP raw_d=({dx:.0},{dy:.0}) abs=({x},{y}) prev=({px},{py})");
+            }
+            if diag_on()
+                && (state.rpad_dx != 0.0 || state.rpad_dy != 0.0)
+                && diag_throttle(1, 40)
+            {
+                info!(
+                    "DIAG pad R abs=({x},{y}) raw_d=({dx:.0},{dy:.0}) out=({:.2},{:.2})",
+                    state.rpad_dx, state.rpad_dy
+                );
             }
         }
         pad_last.1 = Some((x, y));
     } else {
         pad_last.1 = None;
+    }
+
+    // Resting stick bias (no pad touch) — candidate for cursor slam without touching pads.
+    if diag_on()
+        && !state.lpad_touch
+        && !state.rpad_touch
+        && (state.rx.abs() > 0.05 || state.ry.abs() > 0.05)
+        && diag_throttle(2, 200)
+    {
+        info!(
+            "DIAG stick rest rx={:.3} ry={:.3} (mouse uses stick when |r|>0.45)",
+            state.rx, state.ry
+        );
     }
 }

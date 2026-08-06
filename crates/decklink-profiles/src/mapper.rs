@@ -1,14 +1,42 @@
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use decklink_hid::{
     hid_key, idle_release_packets, ControllerState, GamepadButtons, HidPacket, KeyModifiers,
     KeyboardReport, MouseButtons, MouseReport, GAMEPAD_REPORT_ID, KEYBOARD_REPORT_ID,
     MOUSE_REPORT_ID,
 };
+use tracing::info;
 
 use crate::Profile;
 
 static LAST_MOUSE_BUTTONS: AtomicU8 = AtomicU8::new(0);
+
+fn diag_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("DECKLINK_DIAG").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes")
+        )
+    })
+}
+
+fn diag_mouse_throttle() -> bool {
+    use std::sync::Mutex;
+    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    let last = LAST.get_or_init(|| Mutex::new(None));
+    let mut g = last.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    if let Some(prev) = *g {
+        if now.duration_since(prev) < Duration::from_millis(40) {
+            return false;
+        }
+    }
+    *g = Some(now);
+    true
+}
 
 /// Alias kept for UI / docs clarity.
 pub type ProfileKind = Profile;
@@ -64,27 +92,33 @@ fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     let mut mx = 0.0f32;
     let mut my = 0.0f32;
     let mut wheel = 0i8;
+    let mut src = "none";
 
     if both {
         // Two-finger scroll: average vertical motion from both pads.
         let scroll_y = (state.lpad_dy + state.rpad_dy) * 0.5;
         wheel = (scroll_y * 0.35).round().clamp(-7.0, 7.0) as i8;
+        src = "scroll";
     } else {
         if state.lpad_touch {
             mx += state.lpad_dx;
             my += state.lpad_dy;
+            src = "lpad";
         }
         if state.rpad_touch {
             mx += state.rpad_dx;
             my += state.rpad_dy;
+            src = if src == "lpad" { "both_pads" } else { "rpad" };
         }
         if !state.lpad_touch && !state.rpad_touch {
             const STICK_DZ: f32 = 0.45;
             if state.rx.abs() > STICK_DZ {
                 mx += (state.rx.signum() * (state.rx.abs() - STICK_DZ)) * 8.0;
+                src = "stick";
             }
             if state.ry.abs() > STICK_DZ {
                 my += (state.ry.signum() * (state.ry.abs() - STICK_DZ)) * 8.0;
+                src = "stick";
             }
         }
     }
@@ -104,6 +138,23 @@ fn map_keyboard_mouse(state: &ControllerState) -> Vec<HidPacket> {
     let btn_bits = buttons.bits();
     let prev_btns = LAST_MOUSE_BUTTONS.swap(btn_bits, Ordering::Relaxed);
     if dx != 0 || dy != 0 || wheel != 0 || btn_bits != 0 || prev_btns != 0 {
+        if diag_on() && (dx != 0 || dy != 0 || wheel != 0) && diag_mouse_throttle() {
+            info!(
+                "DIAG mouse hid dx={dx} dy={dy} wheel={wheel} src={src} \
+                 lpad_d=({:.2},{:.2}) rpad_d=({:.2},{:.2}) stick=({:.3},{:.3}) \
+                 touch=L{}R{} click=L{}R{}",
+                state.lpad_dx,
+                state.lpad_dy,
+                state.rpad_dx,
+                state.rpad_dy,
+                state.rx,
+                state.ry,
+                state.lpad_touch as u8,
+                state.rpad_touch as u8,
+                state.lpad_click as u8,
+                state.rpad_click as u8,
+            );
+        }
         packets.push(HidPacket {
             report_id: MOUSE_REPORT_ID,
             data: MouseReport {
