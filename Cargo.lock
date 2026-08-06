@@ -1479,6 +1479,7 @@ dependencies = [
  "decklink-net",
  "dirs",
  "eframe",
+ "raw-window-handle",
  "tracing",
  "tracing-subscriber",
  "tray-icon",

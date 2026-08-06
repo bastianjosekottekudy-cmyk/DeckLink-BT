@@ -1,28 +1,75 @@
-//! Minimal host window + system tray (close hides to tray; Quit exits).
+//! Host window + system tray.
+//!
+//! On Windows, eframe's `ViewportCommand::Visible(false)` is unsafe/broken (event loop
+//! stalls or the process dies). We hide with Win32 `ShowWindow(SW_HIDE)` instead and
+//! keep the egui window "alive" for the event loop.
 
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use eframe::egui;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     TrayIcon, TrayIconBuilder, TrayIconEvent,
+};
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::{
+    SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW,
 };
 
 use crate::server::HostHandle;
 
 struct HostApp {
     handle: HostHandle,
-    tray: TrayIcon,
+    tray: Option<TrayIcon>,
     show_id: tray_icon::menu::MenuId,
     quit_id: tray_icon::menu::MenuId,
-    /// Window should be visible (false = in tray only).
-    visible: bool,
-    /// User chose Quit — allow the window to actually close.
+    hwnd: Option<HWND>,
+    /// Logical "in tray" state (Win32 window may be SW_HIDE).
+    in_tray: bool,
     quitting: bool,
-    /// Apply Visible(false) on the next frame (never inside the input lock).
-    hide_pending: bool,
     last_tip: String,
+}
+
+impl HostApp {
+    fn capture_hwnd(&mut self, frame: &eframe::Frame) {
+        if self.hwnd.is_some() {
+            return;
+        }
+        if let Ok(wh) = frame.window_handle() {
+            if let RawWindowHandle::Win32(h) = wh.as_raw() {
+                self.hwnd = Some(HWND(h.hwnd.get() as *mut _));
+            }
+        }
+    }
+
+    fn win_hide(&self) {
+        if let Some(hwnd) = self.hwnd {
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+    }
+
+    fn win_show(&self) {
+        if let Some(hwnd) = self.hwnd {
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+                let _ = SetForegroundWindow(hwnd);
+            }
+        }
+    }
+
+    fn begin_quit(&mut self, ctx: &egui::Context) {
+        self.quitting = true;
+        self.handle.request_stop();
+        // Drop tray before tearing down the GL window — avoids Win32 tray crashes.
+        self.tray.take();
+        self.win_show();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
 }
 
 impl eframe::App for HostApp {
@@ -30,45 +77,34 @@ impl eframe::App for HostApp {
         egui::Color32::from_rgb(15, 20, 25).to_normalized_gamma_f32()
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Tray menu / clicks
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.capture_hwnd(frame);
+
+        // Tray menu
         if let Ok(event) = MenuEvent::receiver().try_recv() {
             if event.id == self.show_id {
-                self.visible = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                self.in_tray = false;
+                self.win_show();
             } else if event.id == self.quit_id {
-                self.quitting = true;
-                self.handle.request_stop();
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                self.begin_quit(ctx);
+                return;
             }
         }
-        while let Ok(_ev) = TrayIconEvent::receiver().try_recv() {
-            self.visible = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+
+        // Tray icon click → show
+        while TrayIconEvent::receiver().try_recv().is_ok() {
+            self.in_tray = false;
+            self.win_show();
         }
 
-        // Close button → tray (must CancelClose or the process exits / crashes).
-        let close_requested = ctx.input(|i| i.viewport().close_requested());
-        if close_requested {
+        // X button → hide to tray (never destroy the window).
+        if ctx.input(|i| i.viewport().close_requested()) {
             if self.quitting {
-                // Let the window close and end the event loop.
-            } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.visible = false;
-                self.hide_pending = true;
+                return;
             }
-        }
-
-        if self.hide_pending {
-            self.hide_pending = false;
-            // Minimized + invisible is more reliable on Win32 than Visible alone.
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.in_tray = true;
+            self.win_hide();
         }
 
         if self.quitting {
@@ -86,13 +122,15 @@ impl eframe::App for HostApp {
             "DeckLink Host — starting…".to_string()
         };
         if tip != self.last_tip {
-            let _ = self.tray.set_tooltip(Some(tip.as_str()));
+            if let Some(tray) = self.tray.as_ref() {
+                let _ = tray.set_tooltip(Some(tip.as_str()));
+            }
             self.last_tip = tip;
         }
 
-        if !self.visible {
-            // Stay in the event loop while hidden — do not tear down GL/window.
-            ctx.request_repaint_after(Duration::from_millis(500));
+        if self.in_tray {
+            // Light pulse so we keep polling tray events; Win32 hide keeps winit alive.
+            ctx.request_repaint_after(Duration::from_millis(400));
             return;
         }
 
@@ -146,9 +184,7 @@ impl eframe::App for HostApp {
             ui.add_space(14.0);
             ui.label("Close this window to keep running in the system tray.");
             if ui.button("Quit").clicked() {
-                self.quitting = true;
-                self.handle.request_stop();
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                self.begin_quit(ctx);
             }
         });
 
@@ -156,6 +192,7 @@ impl eframe::App for HostApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.tray.take();
         self.handle.request_stop();
     }
 }
@@ -193,21 +230,42 @@ pub fn run_ui(handle: HostHandle, title: String) -> Result<()> {
         ..Default::default()
     };
 
-    let app = HostApp {
-        handle: handle.clone(),
-        tray,
-        show_id: item_show.id().clone(),
-        quit_id: item_quit.id().clone(),
-        visible: true,
-        quitting: false,
-        hide_pending: false,
-        last_tip: String::new(),
-    };
+    let show_id = item_show.id().clone();
+    let quit_id = item_quit.id().clone();
+    let handle_ui = handle.clone();
 
     let result = eframe::run_native(
         "DeckLink Host",
         options,
-        Box::new(|_cc| Ok(Box::new(app))),
+        Box::new(move |cc| {
+            // Wake egui when the tray is used while the window is hidden.
+            let ctx_menu = cc.egui_ctx.clone();
+            MenuEvent::set_event_handler(Some(move |_ev| {
+                ctx_menu.request_repaint();
+            }));
+            let ctx_tray = cc.egui_ctx.clone();
+            TrayIconEvent::set_event_handler(Some(move |_ev| {
+                ctx_tray.request_repaint();
+            }));
+
+            let mut hwnd = None;
+            if let Ok(wh) = cc.window_handle() {
+                if let RawWindowHandle::Win32(h) = wh.as_raw() {
+                    hwnd = Some(HWND(h.hwnd.get() as *mut _));
+                }
+            }
+
+            Ok(Box::new(HostApp {
+                handle: handle_ui,
+                tray: Some(tray),
+                show_id,
+                quit_id,
+                hwnd,
+                in_tray: false,
+                quitting: false,
+                last_tip: String::new(),
+            }))
+        }),
     );
 
     handle.request_stop();
@@ -220,7 +278,6 @@ fn tray_icon_rgba() -> tray_icon::Icon {
     for y in 0..size {
         for x in 0..size {
             let i = ((y * size + x) * 4) as usize;
-            // Simple teal square — no PNG decode at startup.
             rgba[i] = 30;
             rgba[i + 1] = 140;
             rgba[i + 2] = 180;
