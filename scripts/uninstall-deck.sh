@@ -111,6 +111,6 @@ echo "  udev rule, Flatpak/Decky copies, download leftovers (if present)"
 echo
 echo "Still manual if present:"
 echo "  Steam Library → remove old Non-Steam 'DeckLink BT' / launch.sh"
-echo "  Host Bluetooth → Forget 'DeckLink BT'"
+echo "  Close decklink-host on the PC if still running"
 echo
 echo "Done."

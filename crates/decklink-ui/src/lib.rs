@@ -1,4 +1,4 @@
-//! Slint UI bindings for DeckLink BT.
+//! Slint UI bindings for DeckLink.
 
 slint::include_modules!();
 
@@ -20,7 +20,7 @@ pub fn index_from_profile(p: Profile) -> i32 {
 
 pub fn format_targets(targets: &[PairedTarget]) -> String {
     if targets.is_empty() {
-        return "(none yet — pair from the host Bluetooth menu)".into();
+        return "(none yet — Connect to a PC running decklink-host)".into();
     }
     targets
         .iter()

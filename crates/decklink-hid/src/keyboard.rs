@@ -121,6 +121,16 @@ impl KeyboardReport {
         ]
     }
 
+    pub fn unpack(data: &[u8]) -> Option<Self> {
+        if data.len() < KEYBOARD_REPORT_LEN {
+            return None;
+        }
+        Some(Self {
+            modifiers: KeyModifiers::from_bits_truncate(data[0]),
+            keys: [data[2], data[3], data[4], data[5], data[6], data[7]],
+        })
+    }
+
     pub fn push_key(&mut self, code: u8) {
         if code == 0 {
             return;

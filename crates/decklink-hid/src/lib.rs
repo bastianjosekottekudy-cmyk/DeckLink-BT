@@ -1,4 +1,4 @@
-//! HID report descriptors and packers for DeckLink BT (HOGP gamepad + mouse + keyboard).
+//! HID report descriptors and packers for DeckLink (gamepad + mouse + keyboard).
 
 mod descriptor;
 mod gamepad;

@@ -1,12 +1,16 @@
 # Changelog
 
-## 1.0.0 — 2026-08-03
+## 1.0.0 — 2026-08-06
+
+### Changed
+- **Wi‑Fi only** — removed BlueZ / BLE HOGP stack (`decklink-bt`)
+- Deck streams HID over UDP (`decklink-net`) to Windows `decklink-host` (ViGEm Xbox 360 + SendInput mouse/keyboard)
+- Physical Steam Deck trackpads stay on the Deck; host mouse uses soft UI only
 
 ### Added
-- Full HOGP BLE gamepad stack (HID + DIS + Battery) via BlueZ / bluer
-- Steam Deck evdev input capture (buttons, sticks, triggers, trackpad, gyro)
-- Profiles: Gamepad, Desktop & Media, Flight, Racing (gyro steer)
-- Slint gamepad-friendly UI
-- Flatpak manifest, udev rules, install script, Steam shortcut helper
-- Decky Loader launcher plugin
-- GitHub Actions CI + release tarball for Linux x86_64
+- `decklink-net` — DLNK UDP protocol (port 31415)
+- `decklink-host` — Windows companion (requires ViGEmBus)
+- Connect UI: PC LAN IP + Connect / Disconnect
+
+### Kept
+- Deck input capture, profiles (Xbox / Keyboard+Mouse), Slint UI, install scripts

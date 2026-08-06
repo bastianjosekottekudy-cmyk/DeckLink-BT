@@ -3,7 +3,8 @@ resolver = "2"
 members = [
     "crates/decklink-hid",
     "crates/decklink-input",
-    "crates/decklink-bt",
+    "crates/decklink-net",
+    "crates/decklink-host",
     "crates/decklink-profiles",
     "crates/decklink-ui",
     "crates/decklink-app",
@@ -11,19 +12,19 @@ members = [
 default-members = ["crates/decklink-app"]
 
 [workspace.package]
-version = "1.0.7"
+version = "1.0.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Bastian Jose <bastianjosekottekudy-cmyk>"]
 repository = "https://github.com/bastianjosekottekudy-cmyk/DeckLink-BT"
 homepage = "https://github.com/bastianjosekottekudy-cmyk/DeckLink-BT"
-description = "Steam Deck as a driverless BLE HOGP gamepad"
+description = "Steam Deck as a Wi-Fi gamepad / keyboard+mouse for Windows"
 rust-version = "1.75"
 
 [workspace.dependencies]
 decklink-hid = { path = "crates/decklink-hid" }
 decklink-input = { path = "crates/decklink-input" }
-decklink-bt = { path = "crates/decklink-bt" }
+decklink-net = { path = "crates/decklink-net" }
 decklink-profiles = { path = "crates/decklink-profiles" }
 decklink-ui = { path = "crates/decklink-ui" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }

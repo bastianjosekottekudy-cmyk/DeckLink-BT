@@ -18,12 +18,12 @@ pub enum InputEvent {
     Error(String),
 }
 
-/// Control exclusive device grab from the app (Bluetooth connect/disconnect).
+/// Control exclusive device grab from the app (Wi-Fi connect/disconnect).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputCommand {
-    /// true = grab sticks/pads away from Desktop mouse; false = release for local use
+    /// true = grab sticks away from Desktop; false = release. Trackpads are never grabbed.
     SetExclusive(bool),
-    /// Freeze Steam (SIGSTOP) so stick→mouse cannot reach Desktop. Use only while HID connected.
+    /// Freeze Steam (SIGSTOP) so stick→mouse cannot reach Desktop. Use only while linked.
     SetSteamFrozen(bool),
 }
 

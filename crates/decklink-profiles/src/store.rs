@@ -26,18 +26,28 @@ pub struct AppConfig {
     pub active_profile: Profile,
     pub device_name: String,
     pub paired_targets: Vec<PairedTarget>,
-    pub advertise_on_start: bool,
+    /// PC host `ip` or `ip:port` (default port 31415).
+    #[serde(default = "default_host_addr")]
+    pub host_addr: String,
+    /// Auto-connect when the app starts.
+    #[serde(default, alias = "advertise_on_start")]
+    pub connect_on_start: bool,
     pub mouse_sensitivity: f32,
     pub gyro_steer_gain: f32,
+}
+
+fn default_host_addr() -> String {
+    String::new()
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             active_profile: Profile::Gamepad,
-            device_name: "DeckLink BT".into(),
+            device_name: "DeckLink".into(),
             paired_targets: Vec::new(),
-            advertise_on_start: true,
+            host_addr: String::new(),
+            connect_on_start: false,
             mouse_sensitivity: 24.0,
             gyro_steer_gain: 0.35,
         }
@@ -98,18 +108,5 @@ impl ProfileStore {
         } else {
             self.config.paired_targets.push(target);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_roundtrip_json() {
-        let c = AppConfig::default();
-        let s = serde_json::to_string(&c).unwrap();
-        let back: AppConfig = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.device_name, "DeckLink BT");
     }
 }

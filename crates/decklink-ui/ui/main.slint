@@ -103,16 +103,17 @@ component MouseBtn inherits Rectangle {
 }
 
 export component MainWindow inherits Window {
-    title: "DeckLink BT";
+    title: "DeckLink";
     preferred-width: 1280px;
     preferred-height: 800px;
     background: #0f1419;
 
     in-out property <string> status-text: "Ready";
     in-out property <int> battery-pct: 100;
-    in-out property <bool> advertising: false;
+    in-out property <bool> linking: false;
     in-out property <bool> connected: false;
     in-out property <string> peer-name: "—";
+    in-out property <string> host-addr: "";
     in-out property <[string]> profile-options: [
         "Xbox Controller",
         "Keyboard & Mouse",
@@ -123,8 +124,9 @@ export component MainWindow inherits Window {
     in-out property <string> type-buffer: "";
     in-out property <float> pad-sensitivity: 1.4;
 
-    callback start-advertise();
-    callback stop-advertise();
+    callback start-connect();
+    callback stop-connect();
+    callback host-addr-edited(string);
     callback profile-changed(int);
     callback refresh-targets();
     callback key-tap(int);
@@ -135,7 +137,7 @@ export component MainWindow inherits Window {
     callback clear-mods();
 
     property <bool> km: selected-profile == 1;
-    property <bool> input-ok: advertising || connected;
+    property <bool> input-ok: linking || connected;
     property <bool> mod-ctrl: mod(sticky-mods, 2) == 1;
     property <bool> mod-shift: mod(sticky-mods / 2, 2) == 1;
     property <bool> mod-alt: mod(sticky-mods / 4, 2) == 1;
@@ -149,15 +151,15 @@ export component MainWindow inherits Window {
         HorizontalBox {
             spacing: 12px;
             Text {
-                text: "DeckLink BT";
+                text: "DeckLink";
                 color: #e8eef5;
                 font-size: 22px;
                 font-weight: 700;
                 vertical-alignment: center;
             }
             Text {
-                text: advertising ? "ADV ON" : "ADV OFF";
-                color: advertising ? #3dd68c : #f07178;
+                text: connected ? "LINK ON" : (linking ? "…" : "LINK OFF");
+                color: connected ? #3dd68c : #f07178;
                 font-size: 14px;
                 font-weight: 700;
                 vertical-alignment: center;
@@ -176,13 +178,29 @@ export component MainWindow inherits Window {
             }
             Rectangle { horizontal-stretch: 1; background: transparent; }
             Button {
-                text: "Advertise";
+                text: "Connect";
                 primary: true;
-                clicked => { root.start-advertise(); }
+                clicked => { root.start-connect(); }
             }
             Button {
-                text: "Stop";
-                clicked => { root.stop-advertise(); }
+                text: "Disconnect";
+                clicked => { root.stop-connect(); }
+            }
+        }
+
+        HorizontalBox {
+            spacing: 8px;
+            Text {
+                text: "PC IP";
+                color: #8aa0b5;
+                font-size: 14px;
+                vertical-alignment: center;
+            }
+            LineEdit {
+                text <=> root.host-addr;
+                placeholder-text: "192.168.x.x or ip:31415";
+                horizontal-stretch: 1;
+                edited => { root.host-addr-edited(root.host-addr); }
             }
         }
 
@@ -248,13 +266,13 @@ export component MainWindow inherits Window {
                 wrap: word-wrap;
             }
             Text {
-                text: "v1.0.7: leave Advertise ON. Pads only for mouse (no stick). If BT flakes, forget once then re-pair.";
+                text: "Wi-Fi: run decklink-host on the PC (ViGEmBus), enter the PC LAN IP above, Connect. Same Wi-Fi network required.";
                 color: #8aa0b5;
                 font-size: 14px;
                 wrap: word-wrap;
             }
             Text {
-                text: "Paired targets";
+                text: "Recent hosts";
                 color: #8aa0b5;
                 font-size: 13px;
             }
@@ -265,7 +283,7 @@ export component MainWindow inherits Window {
                 wrap: word-wrap;
             }
             Button {
-                text: "Refresh Targets";
+                text: "Refresh";
                 clicked => { root.refresh-targets(); }
             }
         }
@@ -295,8 +313,8 @@ export component MainWindow inherits Window {
                         vertical-alignment: center;
                         wrap: word-wrap;
                         text: root.input-ok
-                            ? "Deck trackpads:\n• Left click = left pad click\n• Right click = right pad click\n• Move = either pad\n• Scroll = touch both pads"
-                            : "Start Advertise, then pair on the PC.";
+                            ? "Host mouse: use soft L/M/R + drag this pad.\nDeck trackpads stay on the Deck."
+                            : "Enter PC IP and Connect first.";
                         color: #8a9aaa;
                         font-size: 14px;
                     }
@@ -456,3 +474,4 @@ export component MainWindow inherits Window {
         }
     }
 }
+

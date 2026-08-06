@@ -1,5 +1,5 @@
-//! Disable Steam Deck "lizard mode" (firmware keyboard/mouse) via hidraw.
-//! Keeps sticks/pads from driving the local Desktop cursor while DeckLink is active.
+//! Disable Steam Deck "lizard mode" stick→Desktop mouse via hidraw.
+//! Trackpads are left alone so they keep working on the Deck itself.
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
@@ -13,14 +13,9 @@ const PID_STEAM_DECK: u16 = 0x1205;
 const ID_CLEAR_DIGITAL_MAPPINGS: u8 = 0x81;
 const ID_SET_SETTINGS_VALUES: u8 = 0x87;
 
-const SETTING_LEFT_TRACKPAD_MODE: u8 = 7;
-const SETTING_RIGHT_TRACKPAD_MODE: u8 = 8;
 const SETTING_MOUSE_POINTER_ENABLED: u8 = 9;
 const SETTING_SMOOTH_ABSOLUTE_MOUSE: u8 = 24;
-const SETTING_LEFT_TRACKPAD_CLICK_PRESSURE: u8 = 52;
-const SETTING_RIGHT_TRACKPAD_CLICK_PRESSURE: u8 = 53;
 const SETTING_STEAM_WATCHDOG_ENABLE: u8 = 71;
-const TRACKPAD_NONE: u16 = 7;
 
 const FEATURE_LEN: usize = 65; // report-id byte + 64
 
@@ -104,16 +99,11 @@ fn build_settings(pairs: &[(u8, u16)]) -> Vec<u8> {
 }
 
 fn apply_disable(file: &File) -> std::io::Result<()> {
-    // Full lizard off (same idea as SDL/hid-steam game mode): clear digital
-    // mappings and disable pad→mouse so sticks/pads stop driving Desktop.
+    // Silence stick→Desktop mouse only. Leave trackpads for the Deck.
     send_feature(file, &[ID_CLEAR_DIGITAL_MAPPINGS])?;
     let settings = build_settings(&[
         (SETTING_MOUSE_POINTER_ENABLED, 0),
         (SETTING_SMOOTH_ABSOLUTE_MOUSE, 0),
-        (SETTING_LEFT_TRACKPAD_MODE, TRACKPAD_NONE),
-        (SETTING_RIGHT_TRACKPAD_MODE, TRACKPAD_NONE),
-        (SETTING_LEFT_TRACKPAD_CLICK_PRESSURE, 0xFFFF),
-        (SETTING_RIGHT_TRACKPAD_CLICK_PRESSURE, 0xFFFF),
         (SETTING_STEAM_WATCHDOG_ENABLE, 0),
     ]);
     send_feature(file, &settings)?;
@@ -123,17 +113,13 @@ fn apply_disable(file: &File) -> std::io::Result<()> {
 
 fn apply_watchdog_feed(file: &File) -> std::io::Result<()> {
     send_feature(file, &[ID_CLEAR_DIGITAL_MAPPINGS])?;
-    let settings = build_settings(&[
-        (SETTING_MOUSE_POINTER_ENABLED, 0),
-        (SETTING_RIGHT_TRACKPAD_MODE, TRACKPAD_NONE),
-        (SETTING_LEFT_TRACKPAD_MODE, TRACKPAD_NONE),
-    ]);
+    let settings = build_settings(&[(SETTING_MOUSE_POINTER_ENABLED, 0)]);
     send_feature(file, &settings)?;
     discard_feature(file);
     Ok(())
 }
 
-/// Disable lizard mode on a specific hidraw node.
+/// Silence stick→Desktop mouse on a hidraw node (trackpads unchanged).
 pub fn open_and_disable_on(path: &Path) -> Option<LizardGuard> {
     let file = match OpenOptions::new().read(true).write(true).open(path) {
         Ok(f) => f,
@@ -144,7 +130,10 @@ pub fn open_and_disable_on(path: &Path) -> Option<LizardGuard> {
     };
     match apply_disable(&file) {
         Ok(()) => {
-            info!("lizard mode disabled via {}", path.display());
+            info!(
+                "lizard stick→mouse silenced via {} (trackpads left for Deck)",
+                path.display()
+            );
             Some(LizardGuard { file })
         }
         Err(e) => {

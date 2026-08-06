@@ -188,21 +188,21 @@ def release_exists(tag: str) -> bool:
 
 
 def default_notes(version: str) -> str:
-    return f"""## DeckLink BT v{version}
+    return f"""## DeckLink v{version}
 
-Steam Deck as a driverless BLE HOGP gamepad / keyboard+mouse.
+Steam Deck as a Wi-Fi gamepad / keyboard+mouse for Windows (ViGEmBus host).
 
-### Install (Steam Deck Desktop Mode)
-1. Download `{TARBALL_NAME}` below
-2. Extract and run `bash scripts/install-deck.sh ./{TARBALL_NAME}`
-3. Open **DeckLink BT** from the Desktop Mode app menu, advertise, then pair on the host
+### Install
+1. **PC:** Install ViGEmBus, run `decklink-host.exe` (UDP 31415)
+2. **Deck:** Download `{TARBALL_NAME}`, extract, `bash scripts/install-deck.sh ./{TARBALL_NAME}`
+3. Open **DeckLink**, enter PC LAN IP, Connect
 
 Same release tag is reused; assets are replaced on every publish. Version is not bumped automatically.
 """
 
 
 def publish_release(tag: str, tarball: Path, version: str) -> None:
-    title = f"DeckLink BT v{version}"
+    title = f"DeckLink v{version}"
     notes = default_notes(version)
     if release_exists(tag):
         r = run(

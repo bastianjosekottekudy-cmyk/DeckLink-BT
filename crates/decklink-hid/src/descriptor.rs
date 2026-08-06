@@ -1,9 +1,9 @@
-//! Standard BLE HID Report Map: Gamepad (1) + Mouse (2) + Keyboard (3).
+//! HID Report Map reference: Gamepad (1) + Mouse (2) + Keyboard (3).
 
-/// Bluetooth Appearance value for Generic Gamepad (0x03C4).
+/// Legacy appearance constant (unused on Wi-Fi path).
 pub const APPEARANCE_GAMEPAD: u16 = 0x03C4;
 
-/// Full HID Report Map used by the HOGP GATT Report Map characteristic.
+/// HID Report Map matching packed report layouts.
 ///
 /// Report ID 1 — Game Pad (Xbox-style): 16 buttons, hat, 6 axes (LX LY RX RY LT RT)
 /// Report ID 2 — Mouse: buttons + relative X/Y + wheel

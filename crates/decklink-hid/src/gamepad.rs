@@ -106,6 +106,34 @@ impl GamepadReport {
         out
     }
 
+    pub fn unpack(data: &[u8]) -> Option<Self> {
+        if data.len() < GAMEPAD_REPORT_LEN {
+            return None;
+        }
+        let bits = u16::from_le_bytes([data[0], data[1]]);
+        let hat = match data[2] {
+            0 => Hat::North,
+            1 => Hat::NorthEast,
+            2 => Hat::East,
+            3 => Hat::SouthEast,
+            4 => Hat::South,
+            5 => Hat::SouthWest,
+            6 => Hat::West,
+            7 => Hat::NorthWest,
+            _ => Hat::Center,
+        };
+        Some(Self {
+            buttons: GamepadButtons::from_bits_truncate(bits),
+            hat,
+            lx: i16::from_le_bytes([data[3], data[4]]),
+            ly: i16::from_le_bytes([data[5], data[6]]),
+            rx: i16::from_le_bytes([data[7], data[8]]),
+            ry: i16::from_le_bytes([data[9], data[10]]),
+            lt: data[11],
+            rt: data[12],
+        })
+    }
+
     /// Convert float -1.0..1.0 stick axis to i16 HID value.
     pub fn axis_from_f32(v: f32) -> i16 {
         let c = v.clamp(-1.0, 1.0);

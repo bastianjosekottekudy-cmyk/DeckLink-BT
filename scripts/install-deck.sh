@@ -193,9 +193,9 @@ write_desktop_file() {
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=DeckLink BT
-Comment=Steam Deck as a BLE gamepad / keyboard+mouse
-Exec=env DECKLINK_DIAG=1 WINIT_UNIX_BACKEND=x11 SLINT_BACKEND=winit ${LAUNCH} --advertise --diag
+Name=DeckLink
+Comment=Steam Deck Wi-Fi gamepad / keyboard+mouse
+Exec=env DECKLINK_DIAG=1 WINIT_UNIX_BACKEND=x11 SLINT_BACKEND=winit ${LAUNCH} --diag
 Icon=input-gaming
 Terminal=false
 Categories=Game;Utility;

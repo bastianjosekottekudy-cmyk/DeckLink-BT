@@ -26,6 +26,18 @@ impl MouseReport {
         [self.buttons.bits(), self.dx as u8, self.dy as u8, self.wheel as u8]
     }
 
+    pub fn unpack(data: &[u8]) -> Option<Self> {
+        if data.len() < MOUSE_REPORT_LEN {
+            return None;
+        }
+        Some(Self {
+            buttons: MouseButtons::from_bits_truncate(data[0]),
+            dx: data[1] as i8,
+            dy: data[2] as i8,
+            wheel: data[3] as i8,
+        })
+    }
+
     pub fn is_idle(&self) -> bool {
         self.buttons.is_empty() && self.dx == 0 && self.dy == 0 && self.wheel == 0
     }

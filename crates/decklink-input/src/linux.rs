@@ -1,4 +1,4 @@
-//! Linux input: prefer Valve hidraw Deck reports; grab local pointer devices while BLE is active.
+//! Linux input: prefer Valve hidraw Deck reports; grab local pointer devices while linked.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -115,16 +115,32 @@ fn device_has_rel_x(dev: &Device) -> bool {
         .is_some_and(|a| a.contains(RelativeAxisCode::REL_X))
 }
 
-/// Anything Steam/Deck uses to drive the *local* cursor — grab while advertising.
+/// Grab gamepad/stick nodes so they do not drive Desktop while linked.
+/// Never silence Deck trackpads / Steam mouse — those stay for the Deck itself.
 fn should_silence(name: &str, dev: Option<&Device>) -> bool {
-    if score_local_pointer(name) > 0 || score_gamepad(name) > 0 || score_trackpad(name) > 0 {
+    let lower = name.to_ascii_lowercase();
+    if score_trackpad(name) > 0
+        || lower.contains("touchpad")
+        || lower.contains("trackpad")
+        || ((lower.contains("steam") || lower.contains("valve") || lower.contains("deck"))
+            && lower.contains("mouse"))
+    {
+        return false;
+    }
+    if score_gamepad(name) > 0 {
         return true;
     }
-    // Catch unnamed uinput / libei / Steam virtual pointers.
+    if score_local_pointer(name) > 0 {
+        return true;
+    }
+    // Catch unnamed uinput stick pointers — not pad mice.
     if let Some(d) = dev {
         if device_has_rel_x(d) {
-            let lower = name.to_ascii_lowercase();
-            if !lower.contains("decklink") {
+            if !lower.contains("decklink")
+                && !lower.contains("touchpad")
+                && !lower.contains("trackpad")
+                && !lower.contains("mouse")
+            {
                 return true;
             }
         }

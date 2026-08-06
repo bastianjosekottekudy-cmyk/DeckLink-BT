@@ -3,7 +3,7 @@ name = "decklink-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "DeckLink BT — Steam Deck BLE HOGP gamepad"
+description = "DeckLink — Steam Deck Wi-Fi gamepad / keyboard+mouse"
 default-run = "decklink-bt"
 
 [[bin]]
@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 decklink-hid.workspace = true
 decklink-input.workspace = true
-decklink-bt.workspace = true
+decklink-net.workspace = true
 decklink-profiles.workspace = true
 decklink-ui.workspace = true
 tokio.workspace = true
