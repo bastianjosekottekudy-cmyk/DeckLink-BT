@@ -1,138 +1,162 @@
-//! Host window + system tray.
+//! DeckLink Host window + system tray (Windows).
 //!
-//! On Windows, eframe's `ViewportCommand::Visible(false)` is unsafe/broken. We hide with
-//! Win32 `ShowWindow(SW_HIDE)` instead.
-//!
-//! Tray note: if `MenuEvent`/`TrayIconEvent::set_event_handler` is set, the built-in
-//! `.receiver()` channel gets **nothing**. Handlers must forward into our own channel.
+//! egui/eframe research (issues #5229, #7776, discussion #737):
+//!   • `ViewportCommand::Visible(false)` / Win32 `SW_HIDE` → event loop often spins a
+//!     full core and never runs `update()`, so Show/Quit via egui break.
+//!   • Working approach: capture HWND; tray actions call Win32 directly.
+//!   • For low CPU we **minimize + WS_EX_TOOLWINDOW** (hide from taskbar) instead of
+//!     SW_HIDE, so egui still ticks and we can `sleep` in `update` while in the tray.
 
-use std::sync::atomic::Ordering;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use eframe::egui;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW,
+    FindWindowW, GetWindowLongPtrW, IsWindowVisible, SetForegroundWindow, SetWindowLongPtrW,
+    ShowWindow, GWL_EXSTYLE, SW_MINIMIZE, SW_RESTORE, SW_SHOWDEFAULT, WINDOW_EX_STYLE,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 use crate::server::HostHandle;
 
-enum TrayCmd {
-    Show,
-    Quit,
+pub const WINDOW_TITLE: &str = "DeckLink Host";
+pub const TRAY_RPC_ADDR: &str = "127.0.0.1:31416";
+
+fn to_wide(s: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+fn as_hwnd(raw: isize) -> Option<HWND> {
+    if raw == 0 {
+        None
+    } else {
+        Some(HWND(raw as *mut _))
+    }
+}
+
+fn find_by_title() -> isize {
+    let title = to_wide(WINDOW_TITLE);
+    unsafe {
+        FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr()))
+            .map(|h| h.0 as isize)
+            .unwrap_or(0)
+    }
+}
+
+fn resolve(slot: &AtomicIsize) -> isize {
+    let cur = slot.load(Ordering::SeqCst);
+    if cur != 0 {
+        return cur;
+    }
+    let found = find_by_title();
+    if found != 0 {
+        slot.store(found, Ordering::SeqCst);
+    }
+    found
+}
+
+/// Minimize + remove from taskbar (keeps egui event loop alive → we can sleep).
+fn win_to_tray(slot: &AtomicIsize) -> bool {
+    let Some(h) = as_hwnd(resolve(slot)) else {
+        return false;
+    };
+    unsafe {
+        let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        let mut style = WINDOW_EX_STYLE(ex as u32);
+        style |= WS_EX_TOOLWINDOW;
+        style &= !WS_EX_APPWINDOW;
+        SetWindowLongPtrW(h, GWL_EXSTYLE, style.0 as isize);
+        let _ = ShowWindow(h, SW_MINIMIZE);
+    }
+    true
+}
+
+fn win_from_tray(slot: &AtomicIsize) -> bool {
+    let Some(h) = as_hwnd(resolve(slot)) else {
+        return false;
+    };
+    unsafe {
+        let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        let mut style = WINDOW_EX_STYLE(ex as u32);
+        style &= !WS_EX_TOOLWINDOW;
+        style |= WS_EX_APPWINDOW;
+        SetWindowLongPtrW(h, GWL_EXSTYLE, style.0 as isize);
+        let _ = ShowWindow(h, SW_SHOWDEFAULT);
+        let _ = ShowWindow(h, SW_RESTORE);
+        let _ = SetForegroundWindow(h);
+        IsWindowVisible(h).as_bool()
+    }
+}
+
+fn hard_quit(stop: &AtomicBool) -> ! {
+    stop.store(true, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(40));
+    std::process::exit(0);
 }
 
 struct HostApp {
     handle: HostHandle,
     tray: Option<TrayIcon>,
-    tray_rx: Receiver<TrayCmd>,
-    hwnd: Option<HWND>,
-    /// Logical "in tray" state (Win32 window may be SW_HIDE).
-    in_tray: bool,
-    quitting: bool,
+    hwnd: Arc<AtomicIsize>,
+    in_tray: Arc<AtomicBool>,
     last_tip: String,
-    last_status_gen: u64,
-}
-
-impl HostApp {
-    fn capture_hwnd(&mut self, frame: &eframe::Frame) {
-        if self.hwnd.is_some() {
-            return;
-        }
-        if let Ok(wh) = frame.window_handle() {
-            if let RawWindowHandle::Win32(h) = wh.as_raw() {
-                self.hwnd = Some(HWND(h.hwnd.get() as *mut _));
-            }
-        }
-    }
-
-    fn win_hide(&self) {
-        if let Some(hwnd) = self.hwnd {
-            unsafe {
-                let _ = ShowWindow(hwnd, SW_HIDE);
-            }
-        }
-    }
-
-    fn win_show(&self) {
-        if let Some(hwnd) = self.hwnd {
-            unsafe {
-                let _ = ShowWindow(hwnd, SW_SHOW);
-                let _ = ShowWindow(hwnd, SW_RESTORE);
-                let _ = SetForegroundWindow(hwnd);
-            }
-        }
-    }
-
-    fn begin_quit(&mut self, ctx: &egui::Context) {
-        self.quitting = true;
-        self.in_tray = false;
-        self.handle.request_stop();
-        // Drop tray before tearing down the GL window — avoids Win32 tray crashes.
-        self.tray.take();
-        self.win_show();
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-    }
-
-    fn apply_tray_tooltip(&mut self, tip: &str) {
-        if tip == self.last_tip {
-            return;
-        }
-        if let Some(tray) = self.tray.as_ref() {
-            let _ = tray.set_tooltip(Some(tip));
-        }
-        self.last_tip = tip.to_string();
-    }
-
-    fn drain_tray_cmds(&mut self, ctx: &egui::Context) -> bool {
-        let mut do_quit = false;
-        while let Ok(cmd) = self.tray_rx.try_recv() {
-            match cmd {
-                TrayCmd::Show => {
-                    self.in_tray = false;
-                    self.win_show();
-                }
-                TrayCmd::Quit => do_quit = true,
-            }
-        }
-        if do_quit {
-            self.begin_quit(ctx);
-            return true;
-        }
-        false
-    }
+    last_gen: u64,
 }
 
 impl eframe::App for HostApp {
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+    fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
         egui::Color32::from_rgb(15, 20, 25).to_normalized_gamma_f32()
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.capture_hwnd(frame);
-
-        if self.drain_tray_cmds(ctx) {
-            return;
-        }
-
-        // X button → hide to tray (never destroy the window) — unless quitting.
-        if ctx.input(|i| i.viewport().close_requested()) {
-            if self.quitting {
-                return;
+        if self.hwnd.load(Ordering::SeqCst) == 0 {
+            if let Ok(wh) = frame.window_handle() {
+                if let RawWindowHandle::Win32(h) = wh.as_raw() {
+                    self.hwnd.store(h.hwnd.get(), Ordering::SeqCst);
+                }
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.in_tray = true;
-            self.win_hide();
         }
 
-        if self.quitting {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.in_tray.store(true, Ordering::SeqCst);
+            let _ = win_to_tray(&self.hwnd);
+        }
+
+        if self.in_tray.load(Ordering::SeqCst) {
+            // Event loop still runs while minimized — sleep to keep CPU ~0%.
+            std::thread::sleep(Duration::from_millis(250));
+            ctx.request_repaint_after(Duration::from_millis(250));
+            // Still refresh tray tooltip on status changes.
+            let st = self.handle.status.lock().unwrap().clone();
+            let tip = if let Some(ref p) = st.peer_name {
+                format!("DeckLink Host — linked: {p}")
+            } else if st.listening {
+                "DeckLink Host — waiting for Deck".to_string()
+            } else {
+                "DeckLink Host — starting…".to_string()
+            };
+            if tip != self.last_tip {
+                if let Some(t) = self.tray.as_ref() {
+                    let _ = t.set_tooltip(Some(tip.as_str()));
+                }
+                self.last_tip = tip;
+            }
             return;
         }
 
@@ -147,22 +171,21 @@ impl eframe::App for HostApp {
         } else {
             "DeckLink Host — starting…".to_string()
         };
-        self.apply_tray_tooltip(&tip);
-
-        if self.in_tray {
-            self.last_status_gen = gen;
-            return;
+        if tip != self.last_tip {
+            if let Some(t) = self.tray.as_ref() {
+                let _ = t.set_tooltip(Some(tip.as_str()));
+            }
+            self.last_tip = tip;
         }
 
-        let status_changed = gen != self.last_status_gen;
-        self.last_status_gen = gen;
+        let changed = gen != self.last_gen;
+        self.last_gen = gen;
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(8.0);
             ui.heading("DeckLink Host");
             ui.label("Steam Deck finds this PC on Wi‑Fi (UDP 31415).");
             ui.add_space(10.0);
-
             ui.horizontal(|ui| {
                 let (label, color) = if st.peer.is_some() {
                     ("LINKED", egui::Color32::from_rgb(61, 214, 140))
@@ -174,161 +197,160 @@ impl eframe::App for HostApp {
                 ui.colored_label(color, label);
                 ui.label(format!("listen {}", st.bind));
             });
-
             ui.add_space(8.0);
             if st.vigem_ok {
-                ui.colored_label(
-                    egui::Color32::from_rgb(61, 214, 140),
-                    "ViGEmBus: installed (Xbox pad ready)",
-                );
+                ui.colored_label(egui::Color32::from_rgb(61, 214, 140), "ViGEmBus: ready");
             } else {
-                ui.colored_label(
-                    egui::Color32::from_rgb(240, 113, 120),
-                    "ViGEmBus: not ready (installing in background…)",
-                );
+                ui.colored_label(egui::Color32::from_rgb(240, 113, 120), "ViGEmBus: not ready");
             }
-
             ui.add_space(8.0);
             if let Some(ref n) = st.peer_name {
                 ui.label(format!("Deck: {n}"));
-                if let Some(ref a) = st.peer {
-                    ui.label(format!("from {a}"));
-                }
             } else {
                 ui.label("No Deck connected yet.");
-                ui.label("On the Deck: open DeckLink → Connect.");
             }
-
             if let Some(ref e) = st.last_error {
-                ui.add_space(8.0);
+                ui.add_space(6.0);
                 ui.colored_label(egui::Color32::from_rgb(240, 113, 120), e);
             }
-
             ui.add_space(14.0);
-            ui.label("Close this window to keep running in the system tray.");
-            ui.label("Tray menu: Show / Quit.");
+            ui.label("Close → tray. Right-click tray → Show / Quit.");
             if ui.button("Quit").clicked() {
-                self.begin_quit(ctx);
+                hard_quit(&self.handle.stop);
             }
         });
 
-        if status_changed {
-            ctx.request_repaint_after(Duration::from_millis(100));
+        ctx.request_repaint_after(if changed {
+            Duration::from_millis(200)
         } else {
-            ctx.request_repaint_after(Duration::from_secs(2));
-        }
+            Duration::from_secs(2)
+        });
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
         self.tray.take();
         self.handle.request_stop();
     }
 }
 
-fn forward_tray_events(
-    show_id: tray_icon::menu::MenuId,
-    quit_id: tray_icon::menu::MenuId,
-    tx: Sender<TrayCmd>,
-    ctx: egui::Context,
-) {
-    let tx_menu = tx.clone();
-    let ctx_menu = ctx.clone();
-    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        if event.id == quit_id {
-            let _ = tx_menu.send(TrayCmd::Quit);
-        } else if event.id == show_id {
-            let _ = tx_menu.send(TrayCmd::Show);
-        }
-        ctx_menu.request_repaint();
-    }));
-
-    let tx_icon = tx;
-    let ctx_icon = ctx;
-    TrayIconEvent::set_event_handler(Some(move |_event: TrayIconEvent| {
-        let _ = tx_icon.send(TrayCmd::Show);
-        ctx_icon.request_repaint();
-    }));
+fn spawn_rpc(hwnd: Arc<AtomicIsize>, in_tray: Arc<AtomicBool>, stop: Arc<AtomicBool>) {
+    std::thread::Builder::new()
+        .name("decklink-tray-rpc".into())
+        .spawn(move || {
+            let Ok(listener) = TcpListener::bind(TRAY_RPC_ADDR) else {
+                return;
+            };
+            for stream in listener.incoming().flatten() {
+                let mut line = String::new();
+                if BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .is_err()
+                {
+                    continue;
+                }
+                let mut s = stream;
+                match line.trim().to_ascii_uppercase().as_str() {
+                    "SHOW" => {
+                        in_tray.store(false, Ordering::SeqCst);
+                        let ok = win_from_tray(&hwnd);
+                        let _ = writeln!(s, "{}", if ok { "OK" } else { "ERR" });
+                    }
+                    "HIDE" => {
+                        in_tray.store(true, Ordering::SeqCst);
+                        let ok = win_to_tray(&hwnd);
+                        let _ = writeln!(s, "{}", if ok { "OK" } else { "ERR" });
+                    }
+                    "QUIT" => {
+                        let _ = writeln!(s, "OK");
+                        let _ = s.flush();
+                        hard_quit(&stop);
+                    }
+                    "PING" => {
+                        let _ = writeln!(s, "PONG");
+                    }
+                    other => {
+                        let _ = writeln!(s, "ERR {other}");
+                    }
+                }
+            }
+        })
+        .ok();
 }
 
-pub fn run_ui(handle: HostHandle, title: String) -> Result<()> {
-    let tray_menu = Menu::new();
-    let item_show = MenuItem::new("Show DeckLink Host", true, None);
-    let item_quit = MenuItem::new("Quit", true, None);
-    tray_menu
-        .append(&item_show)
+pub fn run_ui(handle: HostHandle, tray_rpc: bool) -> Result<()> {
+    let menu = Menu::new();
+    let show_item = MenuItem::new("Show DeckLink Host", true, None);
+    let quit_item = MenuItem::new("Quit", true, None);
+    menu.append(&show_item)
         .map_err(|e| anyhow!("tray menu: {e}"))?;
-    tray_menu
-        .append(&PredefinedMenuItem::separator())
+    menu.append(&PredefinedMenuItem::separator())
         .map_err(|e| anyhow!("tray menu: {e}"))?;
-    tray_menu
-        .append(&item_quit)
+    menu.append(&quit_item)
         .map_err(|e| anyhow!("tray menu: {e}"))?;
 
-    let icon = tray_icon_rgba();
-    let tray: TrayIcon = TrayIconBuilder::new()
-        .with_menu(Box::new(tray_menu))
+    let tray = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
         .with_tooltip("DeckLink Host — waiting for Deck")
-        .with_icon(icon)
+        .with_icon(tray_icon_rgba())
         .build()
         .map_err(|e| anyhow!("tray icon: {e}"))?;
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([460.0, 320.0])
-            .with_title(format!("DeckLink Host — {title}"))
-            .with_resizable(false)
-            .with_minimize_button(true)
-            .with_close_button(true),
+            .with_inner_size([460.0, 300.0])
+            .with_title(WINDOW_TITLE)
+            .with_resizable(false),
         centered: true,
         ..Default::default()
     };
 
-    let show_id = item_show.id().clone();
-    let quit_id = item_quit.id().clone();
+    let show_id = show_item.id().clone();
+    let quit_id = quit_item.id().clone();
+    let hwnd = Arc::new(AtomicIsize::new(0));
+    let in_tray = Arc::new(AtomicBool::new(false));
     let handle_ui = handle.clone();
-    let (tray_tx, tray_rx) = mpsc::channel::<TrayCmd>();
+
+    if tray_rpc {
+        spawn_rpc(hwnd.clone(), in_tray.clone(), handle_ui.stop.clone());
+    }
 
     let result = eframe::run_native(
-        "DeckLink Host",
+        WINDOW_TITLE,
         options,
         Box::new(move |cc| {
-            forward_tray_events(show_id, quit_id, tray_tx, cc.egui_ctx.clone());
-
-            // Wake UI when host status changes — no busy loop.
-            let ctx_watch = cc.egui_ctx.clone();
-            let gen = handle_ui.status_gen.clone();
-            let stop = handle_ui.stop.clone();
-            std::thread::Builder::new()
-                .name("decklink-ui-watch".into())
-                .spawn(move || {
-                    let mut last = gen.load(Ordering::Relaxed);
-                    while !stop.load(Ordering::Relaxed) {
-                        std::thread::sleep(Duration::from_millis(500));
-                        let now = gen.load(Ordering::Relaxed);
-                        if now != last {
-                            last = now;
-                            ctx_watch.request_repaint();
-                        }
-                    }
-                })
-                .ok();
-
-            let mut hwnd = None;
             if let Ok(wh) = cc.window_handle() {
                 if let RawWindowHandle::Win32(h) = wh.as_raw() {
-                    hwnd = Some(HWND(h.hwnd.get() as *mut _));
+                    hwnd.store(h.hwnd.get(), Ordering::SeqCst);
                 }
             }
+
+            let hwnd_m = hwnd.clone();
+            let in_tray_m = in_tray.clone();
+            let stop_m = handle_ui.stop.clone();
+            MenuEvent::set_event_handler(Some(move |ev: MenuEvent| {
+                if ev.id == quit_id {
+                    hard_quit(&stop_m);
+                }
+                if ev.id == show_id {
+                    in_tray_m.store(false, Ordering::SeqCst);
+                    let _ = win_from_tray(&hwnd_m);
+                }
+            }));
+
+            let hwnd_c = hwnd.clone();
+            let in_tray_c = in_tray.clone();
+            TrayIconEvent::set_event_handler(Some(move |_ev: TrayIconEvent| {
+                in_tray_c.store(false, Ordering::SeqCst);
+                let _ = win_from_tray(&hwnd_c);
+            }));
 
             Ok(Box::new(HostApp {
                 handle: handle_ui,
                 tray: Some(tray),
-                tray_rx,
                 hwnd,
-                in_tray: false,
-                quitting: false,
+                in_tray,
                 last_tip: String::new(),
-                last_status_gen: 0,
+                last_gen: 0,
             }))
         }),
     );
@@ -337,17 +359,87 @@ pub fn run_ui(handle: HostHandle, title: String) -> Result<()> {
     result.map_err(|e| anyhow!("UI: {e}"))
 }
 
+pub fn run_tray_self_test() -> Result<()> {
+    use std::net::TcpStream;
+    use std::process::{Command, Stdio};
+
+    let exe = std::env::current_exe()?;
+    let mut child = Command::new(&exe)
+        .args([
+            "--skip-vigem-install",
+            "--tray-rpc",
+            "--bind",
+            "127.0.0.1:31417",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        if TcpStream::connect_timeout(
+            &TRAY_RPC_ADDR.parse().unwrap(),
+            Duration::from_millis(200),
+        )
+        .is_ok()
+            && find_by_title() != 0
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if find_by_title() == 0 {
+        let _ = child.kill();
+        bail!("self-test: window not found");
+    }
+
+    fn rpc(cmd: &str) -> Result<String> {
+        let mut stream = TcpStream::connect_timeout(
+            &TRAY_RPC_ADDR.parse().unwrap(),
+            Duration::from_secs(3),
+        )?;
+        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+        stream.write_all(format!("{cmd}\n").as_bytes())?;
+        let mut resp = String::new();
+        BufReader::new(stream).read_line(&mut resp)?;
+        Ok(resp)
+    }
+
+    let r = rpc("HIDE")?;
+    if !r.trim().eq_ignore_ascii_case("OK") {
+        let _ = child.kill();
+        bail!("self-test: HIDE failed: {r:?}");
+    }
+    std::thread::sleep(Duration::from_millis(500));
+
+    let r = rpc("SHOW")?;
+    if !r.trim().eq_ignore_ascii_case("OK") {
+        let _ = child.kill();
+        bail!("self-test: SHOW failed: {r:?}");
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    let h = find_by_title();
+    if h == 0 || !unsafe { IsWindowVisible(HWND(h as *mut _)).as_bool() } {
+        let _ = child.kill();
+        bail!("self-test: not visible after SHOW");
+    }
+
+    let _ = rpc("QUIT");
+    let status = child.wait()?;
+    if status.code().unwrap_or(1) != 0 {
+        bail!("self-test: bad exit {status:?}");
+    }
+    Ok(())
+}
+
 fn tray_icon_rgba() -> tray_icon::Icon {
     let size = 32u32;
     let mut rgba = vec![0u8; (size * size * 4) as usize];
-    for y in 0..size {
-        for x in 0..size {
-            let i = ((y * size + x) * 4) as usize;
-            rgba[i] = 30;
-            rgba[i + 1] = 140;
-            rgba[i + 2] = 180;
-            rgba[i + 3] = 255;
-        }
+    for i in (0..rgba.len()).step_by(4) {
+        rgba[i] = 30;
+        rgba[i + 1] = 140;
+        rgba[i + 2] = 180;
+        rgba[i + 3] = 255;
     }
     tray_icon::Icon::from_rgba(rgba, size, size).expect("icon")
 }

@@ -46,13 +46,20 @@ struct Cli {
     /// Skip ViGEmBus auto-install (Xbox mode will fail without the driver)
     #[arg(long)]
     skip_vigem_install: bool,
+
+    /// Listen on 127.0.0.1:31416 for SHOW/QUIT (test / automation)
+    #[arg(long)]
+    tray_rpc: bool,
+
+    /// Run automated tray hide→show→quit test, then exit
+    #[arg(long)]
+    self_test_tray: bool,
 }
 
 fn main() -> Result<()> {
-    // Allocate a console when launched as windows_subsystem app so --headless logs work.
     #[cfg(windows)]
     {
-        if std::env::args().any(|a| a == "--headless") {
+        if std::env::args().any(|a| a == "--headless" || a == "--self-test-tray") {
             unsafe {
                 let _ = windows::Win32::System::Console::AllocConsole();
             }
@@ -76,7 +83,13 @@ fn main() -> Result<()> {
 
     #[cfg(windows)]
     {
-        // Start UDP immediately — do not block the UI on ViGEm/firewall/UAC.
+        if cli.self_test_tray {
+            info!("running tray self-test…");
+            ui::run_tray_self_test()?;
+            info!("tray self-test OK");
+            return Ok(());
+        }
+
         let handle = server::spawn_host(cli.bind.clone(), cli.name.clone())?;
 
         let skip_vigem = cli.skip_vigem_install;
@@ -91,7 +104,6 @@ fn main() -> Result<()> {
                         s.last_error = Some(e.to_string());
                         s.vigem_ok = vigem_setup::vigem_available();
                     } else if vigem_setup::vigem_available() {
-                        // Server may have started before the driver was ready — mark OK once installed.
                         status.lock().unwrap().vigem_ok = true;
                     }
                 }
@@ -108,7 +120,7 @@ fn main() -> Result<()> {
             handle.request_stop();
             Ok(())
         } else {
-            ui::run_ui(handle, cli.name)
+            ui::run_ui(handle, cli.tray_rpc)
         }
     }
 }
