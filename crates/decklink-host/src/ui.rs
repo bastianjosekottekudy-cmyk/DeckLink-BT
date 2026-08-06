@@ -1,13 +1,13 @@
 //! Host window + system tray.
 //!
-//! On Windows, eframe's `ViewportCommand::Visible(false)` is unsafe/broken (event loop
-//! stalls or the process dies). We hide with Win32 `ShowWindow(SW_HIDE)` instead and
-//! keep the egui window "alive" for the event loop.
+//! On Windows, eframe's `ViewportCommand::Visible(false)` is unsafe/broken. We hide with
+//! Win32 `ShowWindow(SW_HIDE)` instead.
 //!
-//! CPU: do **not** schedule continuous repaints. Wake only on input, tray events, or
-//! a slow status tick while the window is visible.
+//! Tray note: if `MenuEvent`/`TrayIconEvent::set_event_handler` is set, the built-in
+//! `.receiver()` channel gets **nothing**. Handlers must forward into our own channel.
 
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -24,11 +24,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::server::HostHandle;
 
+enum TrayCmd {
+    Show,
+    Quit,
+}
+
 struct HostApp {
     handle: HostHandle,
     tray: Option<TrayIcon>,
-    show_id: tray_icon::menu::MenuId,
-    quit_id: tray_icon::menu::MenuId,
+    tray_rx: Receiver<TrayCmd>,
     hwnd: Option<HWND>,
     /// Logical "in tray" state (Win32 window may be SW_HIDE).
     in_tray: bool,
@@ -69,6 +73,7 @@ impl HostApp {
 
     fn begin_quit(&mut self, ctx: &egui::Context) {
         self.quitting = true;
+        self.in_tray = false;
         self.handle.request_stop();
         // Drop tray before tearing down the GL window — avoids Win32 tray crashes.
         self.tray.take();
@@ -85,6 +90,24 @@ impl HostApp {
         }
         self.last_tip = tip.to_string();
     }
+
+    fn drain_tray_cmds(&mut self, ctx: &egui::Context) -> bool {
+        let mut do_quit = false;
+        while let Ok(cmd) = self.tray_rx.try_recv() {
+            match cmd {
+                TrayCmd::Show => {
+                    self.in_tray = false;
+                    self.win_show();
+                }
+                TrayCmd::Quit => do_quit = true,
+            }
+        }
+        if do_quit {
+            self.begin_quit(ctx);
+            return true;
+        }
+        false
+    }
 }
 
 impl eframe::App for HostApp {
@@ -95,24 +118,11 @@ impl eframe::App for HostApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.capture_hwnd(frame);
 
-        // Tray menu
-        if let Ok(event) = MenuEvent::receiver().try_recv() {
-            if event.id == self.show_id {
-                self.in_tray = false;
-                self.win_show();
-            } else if event.id == self.quit_id {
-                self.begin_quit(ctx);
-                return;
-            }
+        if self.drain_tray_cmds(ctx) {
+            return;
         }
 
-        // Tray icon click → show
-        while TrayIconEvent::receiver().try_recv().is_ok() {
-            self.in_tray = false;
-            self.win_show();
-        }
-
-        // X button → hide to tray (never destroy the window).
+        // X button → hide to tray (never destroy the window) — unless quitting.
         if ctx.input(|i| i.viewport().close_requested()) {
             if self.quitting {
                 return;
@@ -140,12 +150,10 @@ impl eframe::App for HostApp {
         self.apply_tray_tooltip(&tip);
 
         if self.in_tray {
-            // Idle: no scheduled GL repaints. Tray handlers + status watcher wake us.
             self.last_status_gen = gen;
             return;
         }
 
-        // Visible window: redraw on status change; otherwise slow tick only.
         let status_changed = gen != self.last_status_gen;
         self.last_status_gen = gen;
 
@@ -198,13 +206,12 @@ impl eframe::App for HostApp {
 
             ui.add_space(14.0);
             ui.label("Close this window to keep running in the system tray.");
+            ui.label("Tray menu: Show / Quit.");
             if ui.button("Quit").clicked() {
                 self.begin_quit(ctx);
             }
         });
 
-        // Slow heartbeat while visible so WAITING → LINKED updates without input.
-        // (Status watcher also wakes us; this is a cheap fallback.)
         if status_changed {
             ctx.request_repaint_after(Duration::from_millis(100));
         } else {
@@ -216,6 +223,31 @@ impl eframe::App for HostApp {
         self.tray.take();
         self.handle.request_stop();
     }
+}
+
+fn forward_tray_events(
+    show_id: tray_icon::menu::MenuId,
+    quit_id: tray_icon::menu::MenuId,
+    tx: Sender<TrayCmd>,
+    ctx: egui::Context,
+) {
+    let tx_menu = tx.clone();
+    let ctx_menu = ctx.clone();
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        if event.id == quit_id {
+            let _ = tx_menu.send(TrayCmd::Quit);
+        } else if event.id == show_id {
+            let _ = tx_menu.send(TrayCmd::Show);
+        }
+        ctx_menu.request_repaint();
+    }));
+
+    let tx_icon = tx;
+    let ctx_icon = ctx;
+    TrayIconEvent::set_event_handler(Some(move |_event: TrayIconEvent| {
+        let _ = tx_icon.send(TrayCmd::Show);
+        ctx_icon.request_repaint();
+    }));
 }
 
 pub fn run_ui(handle: HostHandle, title: String) -> Result<()> {
@@ -254,19 +286,13 @@ pub fn run_ui(handle: HostHandle, title: String) -> Result<()> {
     let show_id = item_show.id().clone();
     let quit_id = item_quit.id().clone();
     let handle_ui = handle.clone();
+    let (tray_tx, tray_rx) = mpsc::channel::<TrayCmd>();
 
     let result = eframe::run_native(
         "DeckLink Host",
         options,
         Box::new(move |cc| {
-            let ctx_menu = cc.egui_ctx.clone();
-            MenuEvent::set_event_handler(Some(move |_ev| {
-                ctx_menu.request_repaint();
-            }));
-            let ctx_tray = cc.egui_ctx.clone();
-            TrayIconEvent::set_event_handler(Some(move |_ev| {
-                ctx_tray.request_repaint();
-            }));
+            forward_tray_events(show_id, quit_id, tray_tx, cc.egui_ctx.clone());
 
             // Wake UI when host status changes — no busy loop.
             let ctx_watch = cc.egui_ctx.clone();
@@ -297,8 +323,7 @@ pub fn run_ui(handle: HostHandle, title: String) -> Result<()> {
             Ok(Box::new(HostApp {
                 handle: handle_ui,
                 tray: Some(tray),
-                show_id,
-                quit_id,
+                tray_rx,
                 hwnd,
                 in_tray: false,
                 quitting: false,
