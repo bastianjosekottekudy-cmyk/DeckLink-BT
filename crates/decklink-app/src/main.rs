@@ -226,15 +226,14 @@ async fn ensure_connected(shared: &Arc<Mutex<Shared>>) -> Result<()> {
     sync_input_grab(shared);
 
     let join = tokio::task::spawn_blocking(move || {
-        // Prefer LAN discovery (no manual IP). Fall back to saved address if set.
-        match NetClient::connect_auto(&name) {
-            Ok(c) => Ok(c),
-            Err(e) if !prefer.is_empty() => {
-                tracing::warn!("discover failed ({e}); trying saved {prefer}");
-                NetClient::connect(&prefer, &name)
+        // Manual IP first when set; otherwise LAN discovery.
+        if !prefer.is_empty() {
+            match NetClient::connect(&prefer, &name) {
+                Ok(c) => return Ok(c),
+                Err(e) => tracing::warn!("direct connect to {prefer} failed ({e}); trying discover"),
             }
-            Err(e) => Err(e),
         }
+        NetClient::connect_auto(&name)
     })
     .await;
     let result = match join {
@@ -297,7 +296,10 @@ async fn ensure_connected(shared: &Arc<Mutex<Shared>>) -> Result<()> {
                 g.connecting = false;
                 g.linking = false;
                 g.connected = false;
-                g.status = format!("Connect failed: {e}");
+                g.status = format!(
+                    "Connect failed: {e}. Is decklink-host running? Same Wi‑Fi? \
+                     Or type the PC LAN IP above."
+                );
             }
             drop(g);
             sync_input_grab(shared);
@@ -521,6 +523,7 @@ fn run_ui(shared: Arc<Mutex<Shared>>, mut input_rx: mpsc::Receiver<InputEvent>) 
         ui.set_selected_profile(index_from_profile(g.store.config.active_profile));
         ui.set_targets_text(format_targets(&g.store.config.paired_targets).into());
         ui.set_status_text(g.status.clone().into());
+        ui.set_host_addr(g.store.config.host_addr.clone().into());
         ui.set_battery_pct(100);
         ui.set_sticky_mods(g.sticky_mods as i32);
     }
@@ -529,7 +532,15 @@ fn run_ui(shared: Arc<Mutex<Shared>>, mut input_rx: mpsc::Receiver<InputEvent>) 
 
     {
         let tx = cmd_tx.clone();
+        let shared_ref = shared.clone();
+        let ui_weak = ui.as_weak();
         ui.on_start_connect(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let addr = ui.get_host_addr().to_string();
+                let mut g = shared_ref.lock().unwrap();
+                g.store.config.host_addr = addr.trim().to_string();
+                let _ = g.store.save();
+            }
             let _ = tx.send(UiCommand::Connect);
         });
     }
@@ -831,6 +842,7 @@ fn push_ui(
             format_targets(&g.store.config.paired_targets),
             index_from_profile(g.store.config.active_profile),
             g.sticky_mods as i32,
+            g.store.config.host_addr.clone(),
         )
     };
     let ui_weak = ui_weak.clone();
@@ -844,6 +856,10 @@ fn push_ui(
             ui.set_targets_text(snapshot.5.into());
             ui.set_selected_profile(snapshot.6);
             ui.set_sticky_mods(snapshot.7);
+            // Don't clobber what the user is typing unless linked/empty sync needed.
+            if snapshot.2 || ui.get_host_addr().is_empty() {
+                ui.set_host_addr(snapshot.8.into());
+            }
         }
     });
 }

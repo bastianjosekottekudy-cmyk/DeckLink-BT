@@ -20,6 +20,8 @@ use tracing::{debug, info, warn};
 pub const MAGIC: u32 = 0x444C_4E4B; // DLNK
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const DEFAULT_PORT: u16 = 31415;
+/// LAN multicast group for Discover/Announce (survives AP broadcast filtering better).
+pub const MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 90, 15);
 pub const HEADER_LEN: usize = 12;
 pub const MAX_PAYLOAD: usize = 240;
 pub const MAX_PACKET: usize = HEADER_LEN + MAX_PAYLOAD;
@@ -182,18 +184,63 @@ pub fn parse_host_addr(host: &str) -> Result<SocketAddr, NetError> {
     })
 }
 
-/// Broadcast Discover and collect Announce replies for `timeout`.
+/// Destinations for Discover probes (limited broadcast, subnet /24, multicast).
+fn discover_destinations() -> Vec<SocketAddr> {
+    let mut dests = Vec::new();
+    let push = |v: &mut Vec<SocketAddr>, ip: Ipv4Addr| {
+        let a = SocketAddr::V4(SocketAddrV4::new(ip, DEFAULT_PORT));
+        if !v.contains(&a) {
+            v.push(a);
+        }
+    };
+    push(&mut dests, Ipv4Addr::BROADCAST);
+    push(&mut dests, MULTICAST_ADDR);
+
+    // Infer LAN /24 from the route used for outbound traffic (works on Deck + Windows).
+    if let Ok(probe) = UdpSocket::bind("0.0.0.0:0") {
+        if probe.connect("1.1.1.1:53").is_ok() {
+            if let Ok(SocketAddr::V4(local)) = probe.local_addr() {
+                let o = local.ip().octets();
+                push(
+                    &mut dests,
+                    Ipv4Addr::new(o[0], o[1], o[2], 255),
+                );
+                // Common guest/home alternate /24s on the same first two octets.
+                if o[2] > 0 {
+                    push(&mut dests, Ipv4Addr::new(o[0], o[1], o[2].wrapping_sub(1), 255));
+                }
+                if o[2] < 255 {
+                    push(&mut dests, Ipv4Addr::new(o[0], o[1], o[2].wrapping_add(1), 255));
+                }
+            }
+        }
+    }
+    dests
+}
+
+fn send_discover(sock: &UdpSocket, pkt: &[u8]) {
+    for dest in discover_destinations() {
+        let _ = sock.send_to(pkt, dest);
+    }
+}
+
+/// Broadcast/multicast Discover and collect Announce replies for `timeout`.
 pub fn discover_hosts(timeout: Duration) -> Result<Vec<DiscoveredHost>, NetError> {
     let sock = UdpSocket::bind("0.0.0.0:0")?;
     sock.set_broadcast(true)?;
+    let _ = sock.set_multicast_ttl_v4(2);
     sock.set_read_timeout(Some(Duration::from_millis(200)))?;
 
     let discover = encode(MsgKind::Discover, 1, &[])?;
-    let bcast = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, DEFAULT_PORT));
-    sock.send_to(&discover, bcast)?;
+    send_discover(&sock, &discover);
+    info!(
+        "discover probe → {} dests (timeout {timeout:?})",
+        discover_destinations().len()
+    );
 
     let mut found: Vec<DiscoveredHost> = Vec::new();
     let deadline = Instant::now() + timeout;
+    let mut last_probe = Instant::now();
     let mut buf = [0u8; MAX_PACKET];
     while Instant::now() < deadline {
         match sock.recv_from(&mut buf) {
@@ -206,7 +253,7 @@ pub fn discover_hosts(timeout: Duration) -> Result<Vec<DiscoveredHost>, NetError
                         } else {
                             name
                         };
-                        // Reply comes from host's data port.
+                        // Host always serves on DEFAULT_PORT (source may be same).
                         let host = SocketAddr::new(addr.ip(), DEFAULT_PORT);
                         if !found.iter().any(|h| h.addr == host) {
                             info!("discovered {name} @ {host}");
@@ -219,9 +266,9 @@ pub fn discover_hosts(timeout: Duration) -> Result<Vec<DiscoveredHost>, NetError
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
-                // Re-broadcast once mid-wait.
-                if Instant::now() + timeout / 2 < deadline {
-                    let _ = sock.send_to(&discover, bcast);
+                if last_probe.elapsed() >= Duration::from_millis(400) {
+                    send_discover(&sock, &discover);
+                    last_probe = Instant::now();
                 }
             }
             Err(e) => return Err(e.into()),
@@ -242,7 +289,7 @@ pub struct NetClient {
 impl NetClient {
     /// Find a host on the LAN and complete Hello.
     pub fn connect_auto(device_name: &str) -> Result<Self, NetError> {
-        let hosts = discover_hosts(Duration::from_secs(2))?;
+        let hosts = discover_hosts(Duration::from_secs(4))?;
         let Some(host) = hosts.into_iter().next() else {
             return Err(NetError::NoHostsFound);
         };

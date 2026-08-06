@@ -10,6 +10,8 @@ use clap::Parser;
 use tracing::{error, info};
 
 #[cfg(windows)]
+mod firewall;
+#[cfg(windows)]
 mod inject;
 #[cfg(windows)]
 mod pad;
@@ -80,6 +82,8 @@ fn main() -> Result<()> {
                 // Still start UI so user sees the error; server will also report vigem_ok=false.
             }
         }
+        // Discovery needs inbound UDP 31415 — private GUI apps often get silently blocked.
+        firewall::ensure_firewall_rule();
 
         let handle = server::spawn_host(cli.bind.clone(), cli.name.clone())?;
         if cli.headless {

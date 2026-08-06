@@ -99,7 +99,8 @@ pub fn run_ui(handle: HostHandle, title: String) -> Result<()> {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(8.0);
             ui.heading("DeckLink Host");
-            ui.label("Steam Deck finds this PC automatically on Wi‑Fi.");
+            ui.label("Steam Deck finds this PC on Wi‑Fi (UDP 31415).");
+            ui.label("First run may ask for firewall / ViGEm UAC approval.");
             ui.add_space(10.0);
 
             ui.horizontal(|ui| {

@@ -26,8 +26,9 @@ Same Wi‑Fi network required. No Bluetooth. No typing IP addresses — the Deck
 
 ### Windows PC
 
-- Run `decklink-host.exe` once (allow firewall UDP **31415** if prompted)
+- Run `decklink-host.exe` once (allow firewall UDP **31415** if prompted — host adds a firewall rule on first run)
 - On first launch it installs **ViGEmBus** automatically (UAC yes) — or place `ViGEmBusSetup_x64.msi` next to the exe
+- Deck and PC must be on the **same LAN** (AP/client isolation breaks discovery)
 
 ## Quick start
 

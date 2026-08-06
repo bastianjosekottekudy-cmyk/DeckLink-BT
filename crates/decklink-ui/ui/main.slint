@@ -109,6 +109,7 @@ export component MainWindow inherits Window {
     background: #0f1419;
 
     in-out property <string> status-text: "Ready";
+    in-out property <string> host-addr: "";
     in-out property <int> battery-pct: 100;
     in-out property <bool> linking: false;
     in-out property <bool> connected: false;
@@ -175,6 +176,19 @@ export component MainWindow inherits Window {
                 vertical-alignment: center;
             }
             Rectangle { horizontal-stretch: 1; background: transparent; }
+            Text {
+                text: "PC IP (optional)";
+                color: #8aa0b5;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            LineEdit {
+                text <=> root.host-addr;
+                placeholder-text: "auto-find on Wi‑Fi";
+                // Wide enough for IPv4; leave empty to discover.
+                min-width: 140px;
+                enabled: !root.connected && !root.linking;
+            }
             Button {
                 text: "Connect";
                 primary: true;
@@ -248,7 +262,7 @@ export component MainWindow inherits Window {
                 wrap: word-wrap;
             }
             Text {
-                text: "Xbox mode: sticks/triggers/buttons → PC as Xbox 360. Start decklink-host on the PC, then Connect — finds it on Wi‑Fi automatically.";
+                text: "Xbox mode: sticks/triggers/buttons → PC as Xbox 360. Start decklink-host on the PC, then Connect. Leave PC IP empty to auto-find.";
                 color: #8aa0b5;
                 font-size: 14px;
                 wrap: word-wrap;

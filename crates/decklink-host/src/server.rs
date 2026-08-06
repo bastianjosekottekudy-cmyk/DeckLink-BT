@@ -14,7 +14,7 @@ use decklink_hid::{
     KEYBOARD_REPORT_ID, MOUSE_REPORT_ID,
 };
 use decklink_net::{
-    decode, decode_hid, encode, MsgKind, DEFAULT_PORT, MAX_PACKET,
+    decode, decode_hid, encode, MsgKind, DEFAULT_PORT, MAX_PACKET, MULTICAST_ADDR,
 };
 
 use crate::inject::Injector;
@@ -75,17 +75,28 @@ fn run_loop(
     let sock = UdpSocket::bind(&bind).with_context(|| format!("bind {bind}"))?;
     sock.set_broadcast(true)?;
     sock.set_read_timeout(Some(Duration::from_millis(50)))?;
+    // Receive Discover probes sent to the LAN multicast group.
+    match sock.join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::UNSPECIFIED) {
+        Ok(()) => info!("joined multicast {MULTICAST_ADDR}:{DEFAULT_PORT}"),
+        Err(e) => warn!("multicast join failed ({e}) — broadcast-only discovery"),
+    }
+    let _ = sock.set_multicast_loop_v4(false);
 
+    // Keep listening even if ViGEm is missing (mouse/keyboard still work).
     let mut pad = match VirtualPad::new() {
         Ok(p) => {
             status.lock().unwrap().vigem_ok = true;
-            p
+            info!("ViGEm Xbox pad ready");
+            Some(p)
         }
         Err(e) => {
             let mut s = status.lock().unwrap();
             s.vigem_ok = false;
-            s.last_error = Some(e.to_string());
-            return Err(e);
+            s.last_error = Some(format!(
+                "ViGEmBus not ready ({e}). Xbox mode unavailable; mouse/keyboard still work."
+            ));
+            warn!("ViGEm unavailable — continuing without gamepad: {e}");
+            None
         }
     };
     let mut inject = Injector::new();
@@ -93,7 +104,6 @@ fn run_loop(
     {
         let mut s = status.lock().unwrap();
         s.listening = true;
-        s.last_error = None;
     }
     info!("listening — Deck Connect will find this PC automatically");
 
@@ -108,7 +118,7 @@ fn run_loop(
         .unwrap_or_else(Instant::now);
 
     while !stop.load(Ordering::SeqCst) {
-        // Periodic LAN announce so Deck can find us without typing an IP.
+        // Periodic multicast announce (Deck probes actively; this helps stubborn LANs).
         if last_announce.elapsed() > Duration::from_secs(2) {
             let _ = broadcast_announce(&sock, &name, &mut seq);
             last_announce = Instant::now();
@@ -144,6 +154,7 @@ fn run_loop(
                         let ack = encode(MsgKind::Announce, seq, name.as_bytes())?;
                         seq = seq.wrapping_add(1);
                         let _ = sock.send_to(&ack, addr);
+                        info!("answered Discover from {addr}");
                     }
                     MsgKind::Hello => {
                         let deck_name = String::from_utf8_lossy(&env.payload).into_owned();
@@ -208,7 +219,9 @@ fn run_loop(
                         match pkt.report_id {
                             GAMEPAD_REPORT_ID => {
                                 if let Some(r) = GamepadReport::unpack(&pkt.data) {
-                                    pad.update(&r);
+                                    if let Some(pad) = pad.as_mut() {
+                                        pad.update(&r);
+                                    }
                                 }
                             }
                             MOUSE_REPORT_ID => {
@@ -254,6 +267,9 @@ fn run_loop(
 fn broadcast_announce(sock: &UdpSocket, name: &str, seq: &mut u32) -> Result<()> {
     let pkt = encode(MsgKind::Announce, *seq, name.as_bytes())?;
     *seq = seq.wrapping_add(1);
+    // Multicast — Deck probes this group during discover.
+    let multi = SocketAddr::V4(SocketAddrV4::new(MULTICAST_ADDR, DEFAULT_PORT));
+    let _ = sock.send_to(&pkt, multi);
     let bcast = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, DEFAULT_PORT));
     let _ = sock.send_to(&pkt, bcast);
     Ok(())
@@ -261,7 +277,7 @@ fn broadcast_announce(sock: &UdpSocket, name: &str, seq: &mut u32) -> Result<()>
 
 fn drop_peer(
     peer: &mut Option<(SocketAddr, Instant)>,
-    pad: &mut VirtualPad,
+    pad: &mut Option<VirtualPad>,
     inject: &mut Injector,
     last_keys: &mut HashSet<u8>,
     last_mods: &mut KeyModifiers,
@@ -269,7 +285,9 @@ fn drop_peer(
     status: &Arc<Mutex<HostStatus>>,
 ) {
     *peer = None;
-    pad.reset();
+    if let Some(pad) = pad.as_mut() {
+        pad.reset();
+    }
     inject.reset(last_keys, last_mods, last_mouse_btns);
     let mut s = status.lock().unwrap();
     s.peer = None;
