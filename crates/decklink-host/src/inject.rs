@@ -4,10 +4,10 @@ use std::collections::HashSet;
 
 use decklink_hid::{KeyModifiers, KeyboardReport, MouseButtons, MouseReport};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT,
-    VIRTUAL_KEY, KEYBDINPUT,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY,
+    KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, KEYBDINPUT,
 };
 
 pub struct Injector;
@@ -17,11 +17,47 @@ impl Injector {
         Self
     }
 
-    pub fn release_all(&mut self) {
-        // Best-effort: release common modifiers.
-        for vk in [0x10u16, 0x11, 0x12, 0x5B, 0x5C] {
-            key_event(vk, false);
+    /// Release every tracked key/modifier/mouse button and clear tracking state.
+    pub fn reset(
+        &mut self,
+        last_keys: &mut HashSet<u8>,
+        last_mods: &mut KeyModifiers,
+        last_mouse: &mut MouseButtons,
+    ) {
+        for code in last_keys.iter() {
+            if let Some(vk) = hid_to_vk(*code) {
+                key_event(vk, false);
+            }
         }
+        last_keys.clear();
+
+        if last_mods.intersects(KeyModifiers::LEFT_CTRL | KeyModifiers::RIGHT_CTRL) {
+            key_event(0x11, false);
+        }
+        if last_mods.intersects(KeyModifiers::LEFT_SHIFT | KeyModifiers::RIGHT_SHIFT) {
+            key_event(0x10, false);
+        }
+        if last_mods.intersects(KeyModifiers::LEFT_ALT | KeyModifiers::RIGHT_ALT) {
+            key_event(0x12, false);
+        }
+        if last_mods.contains(KeyModifiers::LEFT_GUI) {
+            key_event(0x5B, false);
+        }
+        if last_mods.contains(KeyModifiers::RIGHT_GUI) {
+            key_event(0x5C, false);
+        }
+        *last_mods = KeyModifiers::empty();
+
+        if last_mouse.contains(MouseButtons::LEFT) {
+            mouse_btn(MOUSEEVENTF_LEFTUP);
+        }
+        if last_mouse.contains(MouseButtons::RIGHT) {
+            mouse_btn(MOUSEEVENTF_RIGHTUP);
+        }
+        if last_mouse.contains(MouseButtons::MIDDLE) {
+            mouse_btn(MOUSEEVENTF_MIDDLEUP);
+        }
+        *last_mouse = MouseButtons::empty();
     }
 
     pub fn apply_mouse(&mut self, r: &MouseReport, last: &mut MouseButtons) {
@@ -102,12 +138,7 @@ impl Injector {
     }
 }
 
-fn sync_mod(
-    last: &KeyModifiers,
-    now: KeyModifiers,
-    mask: KeyModifiers,
-    vk: u16,
-) {
+fn sync_mod(last: &KeyModifiers, now: KeyModifiers, mask: KeyModifiers, vk: u16) {
     let was = last.intersects(mask);
     let is = now.intersects(mask);
     if is && !was {
@@ -117,12 +148,22 @@ fn sync_mod(
     }
 }
 
+fn vk_needs_extended(vk: u16) -> bool {
+    matches!(
+        vk,
+        0x21 | 0x22 | 0x23 | 0x24 | 0x25 | 0x26 | 0x27 | 0x28 | 0x2D | 0x2E | 0x2C | 0x13
+    )
+}
+
 fn key_event(vk: u16, down: bool) {
-    let flags = if down {
+    let mut flags = if down {
         KEYBD_EVENT_FLAGS(0)
     } else {
         KEYEVENTF_KEYUP
     };
+    if vk_needs_extended(vk) {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
     let input = INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {

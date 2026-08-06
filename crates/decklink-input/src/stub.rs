@@ -22,8 +22,10 @@ pub async fn spawn_input_task(
                     InputCommand::SetSteamFrozen(on) => info!("stub steam freeze = {on}"),
                 }
             }
-            let mut state = ControllerState::default();
-            state.battery_pct = read_battery_percent();
+            let state = ControllerState {
+                battery_pct: read_battery_percent(),
+                ..Default::default()
+            };
             if tx.send(InputEvent::State(state)).await.is_err() {
                 break;
             }

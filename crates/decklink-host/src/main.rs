@@ -57,6 +57,20 @@ fn main() -> Result<()> {
 }
 
 #[cfg(windows)]
+fn drop_peer(
+    peer: &mut Option<(std::net::SocketAddr, Instant)>,
+    pad: &mut pad::VirtualPad,
+    inject: &mut inject::Injector,
+    last_keys: &mut HashSet<u8>,
+    last_mods: &mut KeyModifiers,
+    last_mouse_btns: &mut MouseButtons,
+) {
+    *peer = None;
+    pad.reset();
+    inject.reset(last_keys, last_mods, last_mouse_btns);
+}
+
+#[cfg(windows)]
 fn run_windows(cli: Cli) -> Result<()> {
     info!("binding UDP {}", cli.bind);
     let sock = UdpSocket::bind(&cli.bind).with_context(|| format!("bind {}", cli.bind))?;
@@ -80,6 +94,21 @@ fn run_windows(cli: Cli) -> Result<()> {
     let mut last_mouse_btns = MouseButtons::empty();
 
     loop {
+        // Always check peer timeout, even when the socket keeps receiving noise.
+        if let Some((addr, t)) = peer {
+            if t.elapsed() > Duration::from_secs(5) {
+                warn!("Deck {addr} timed out");
+                drop_peer(
+                    &mut peer,
+                    &mut pad,
+                    &mut inject,
+                    &mut last_keys,
+                    &mut last_mods,
+                    &mut last_mouse_btns,
+                );
+            }
+        }
+
         match sock.recv_from(&mut buf) {
             Ok((n, addr)) => {
                 let env = match decode(&buf[..n]) {
@@ -97,12 +126,15 @@ fn run_windows(cli: Cli) -> Result<()> {
                         let ack = encode(MsgKind::HelloAck, seq, cli.name.as_bytes())?;
                         seq = seq.wrapping_add(1);
                         sock.send_to(&ack, addr)?;
+                        drop_peer(
+                            &mut peer,
+                            &mut pad,
+                            &mut inject,
+                            &mut last_keys,
+                            &mut last_mods,
+                            &mut last_mouse_btns,
+                        );
                         peer = Some((addr, Instant::now()));
-                        last_keys.clear();
-                        last_mods = KeyModifiers::empty();
-                        last_mouse_btns = MouseButtons::empty();
-                        pad.reset();
-                        inject.release_all();
                     }
                     MsgKind::Heartbeat => {
                         if let Some((p, t)) = peer.as_mut() {
@@ -117,10 +149,14 @@ fn run_windows(cli: Cli) -> Result<()> {
                     MsgKind::Goodbye => {
                         info!("Deck goodbye from {addr}");
                         if peer.map(|(p, _)| p) == Some(addr) {
-                            peer = None;
-                            pad.reset();
-                            inject.release_all();
-                            last_keys.clear();
+                            drop_peer(
+                                &mut peer,
+                                &mut pad,
+                                &mut inject,
+                                &mut last_keys,
+                                &mut last_mods,
+                                &mut last_mouse_btns,
+                            );
                         }
                     }
                     MsgKind::Hid => {
@@ -130,7 +166,6 @@ fn run_windows(cli: Cli) -> Result<()> {
                             }
                             *t = Instant::now();
                         } else {
-                            // Accept HID before hello only if we got traffic — require hello.
                             continue;
                         }
                         let pkt = match decode_hid(&env.payload) {
@@ -168,18 +203,7 @@ fn run_windows(cli: Cli) -> Result<()> {
             }
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
-            {
-                if let Some((addr, t)) = peer {
-                    if t.elapsed() > Duration::from_secs(5) {
-                        warn!("Deck {addr} timed out");
-                        peer = None;
-                        pad.reset();
-                        inject.release_all();
-                        last_keys.clear();
-                    }
-                }
-            }
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(e) => {
                 error!("recv: {e}");
                 return Err(e.into());

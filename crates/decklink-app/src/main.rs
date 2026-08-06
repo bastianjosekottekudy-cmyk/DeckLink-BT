@@ -57,6 +57,8 @@ struct Shared {
     /// Session armed (connecting or connected).
     linking: bool,
     connected: bool,
+    /// Bumped on disconnect so in-flight connect results are ignored.
+    connect_gen: u64,
     peer_name: String,
     status: String,
     sticky_mods: u8,
@@ -166,6 +168,7 @@ async fn main() -> Result<()> {
         connecting: false,
         linking: false,
         connected: false,
+        connect_gen: 0,
         peer_name: "—".into(),
         status: format!(
             "Ready v{} — enter PC IP, Connect. PC needs decklink-host + ViGEmBus.",
@@ -189,8 +192,7 @@ async fn main() -> Result<()> {
             error!("UI failed: {e}");
             {
                 let mut g = shared.lock().unwrap();
-                g.store.config.connect_on_start = true;
-                g.status = format!("UI failed ({e}); headless connect");
+                g.status = format!("UI failed ({e}); headless mode");
             }
             let (input_tx, mut input_rx2) = mpsc::channel::<InputEvent>(256);
             let (cmd_tx, cmd_rx) = mpsc::channel::<InputCommand>(8);
@@ -205,7 +207,7 @@ async fn main() -> Result<()> {
 }
 
 async fn ensure_connected(shared: &Arc<Mutex<Shared>>) -> Result<()> {
-    let (host, name) = {
+    let (host, name, gen) = {
         let mut g = shared.lock().unwrap();
         if g.link.is_some() || g.connecting {
             return Ok(());
@@ -215,15 +217,31 @@ async fn ensure_connected(shared: &Arc<Mutex<Shared>>) -> Result<()> {
             g.status = "Set PC IP first (e.g. 192.168.1.20)".into();
             anyhow::bail!("no host_addr");
         }
+        g.connect_gen = g.connect_gen.wrapping_add(1);
+        let gen = g.connect_gen;
         g.connecting = true;
         g.linking = true;
         g.status = format!("Connecting to {host}…");
-        (host, g.store.config.device_name.clone())
+        (host, g.store.config.device_name.clone(), gen)
     };
     sync_input_grab(shared);
 
-    // Blocking UDP hello on a worker so we don't freeze the async runtime long.
-    let result = tokio::task::spawn_blocking(move || NetClient::connect(&host, &name)).await?;
+    let join = tokio::task::spawn_blocking(move || NetClient::connect(&host, &name)).await;
+    let result = match join {
+        Ok(r) => r,
+        Err(e) => {
+            let mut g = shared.lock().unwrap();
+            if g.connect_gen == gen {
+                g.connecting = false;
+                g.linking = false;
+                g.connected = false;
+                g.status = format!("Connect worker failed: {e}");
+            }
+            drop(g);
+            sync_input_grab(shared);
+            return Err(anyhow::anyhow!("connect worker: {e}"));
+        }
+    };
 
     match result {
         Ok(client) => {
@@ -231,6 +249,15 @@ async fn ensure_connected(shared: &Arc<Mutex<Shared>>) -> Result<()> {
             let peer_name = client.peer_name.clone();
             {
                 let mut g = shared.lock().unwrap();
+                if g.connect_gen != gen {
+                    // User disconnected while hello was in flight.
+                    let mut client = client;
+                    for pkt in idle_release_packets() {
+                        let _ = client.send_hid(&pkt);
+                    }
+                    let _ = client.send_goodbye();
+                    return Ok(());
+                }
                 g.connecting = false;
                 g.linking = true;
                 g.connected = true;
@@ -255,10 +282,12 @@ async fn ensure_connected(shared: &Arc<Mutex<Shared>>) -> Result<()> {
         }
         Err(e) => {
             let mut g = shared.lock().unwrap();
-            g.connecting = false;
-            g.linking = false;
-            g.connected = false;
-            g.status = format!("Connect failed: {e}");
+            if g.connect_gen == gen {
+                g.connecting = false;
+                g.linking = false;
+                g.connected = false;
+                g.status = format!("Connect failed: {e}");
+            }
             drop(g);
             sync_input_grab(shared);
             Err(e.into())
@@ -294,6 +323,7 @@ fn acquire_instance_lock() -> Result<std::fs::File> {
         Ok(std::fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .open(dir.join("decklink.lock"))?)
     }
 }
@@ -301,12 +331,18 @@ fn acquire_instance_lock() -> Result<std::fs::File> {
 async fn stop_link(shared: &Arc<Mutex<Shared>>) {
     {
         let mut g = shared.lock().unwrap();
+        g.connect_gen = g.connect_gen.wrapping_add(1);
         if let Some(mut link) = g.link.take() {
+            for pkt in idle_release_packets() {
+                let _ = link.send_hid(&pkt);
+            }
             let _ = link.send_goodbye();
         }
         g.linking = false;
         g.connected = false;
         g.connecting = false;
+        g.sticky_mods = 0;
+        g.soft_mouse_buttons = 0;
         g.status = "Disconnected — Deck sticks/trackpads returned to Desktop".into();
     }
     sync_input_grab(shared);
@@ -372,9 +408,16 @@ fn poll_link(shared: &Arc<Mutex<Shared>>) {
             g.last_heartbeat = std::time::Instant::now();
         }
         if drop_link {
-            let _ = g.link.take();
+            if let Some(mut link) = g.link.take() {
+                for pkt in idle_release_packets() {
+                    let _ = link.send_hid(&pkt);
+                }
+                let _ = link.send_goodbye();
+            }
             g.connected = false;
             g.linking = false;
+            g.sticky_mods = 0;
+            g.soft_mouse_buttons = 0;
         }
     }
     if drop_link {
@@ -395,9 +438,16 @@ async fn pump_reports(shared: &Arc<Mutex<Shared>>, state: &decklink_hid::Control
             if let Err(e) = link.send_hid(&pkt) {
                 warn!("send_hid: {e}");
                 g.status = format!("Send failed: {e}");
-                let _ = g.link.take();
+                if let Some(mut link) = g.link.take() {
+                    for idle in idle_release_packets() {
+                        let _ = link.send_hid(&idle);
+                    }
+                    let _ = link.send_goodbye();
+                }
                 g.connected = false;
                 g.linking = false;
+                g.sticky_mods = 0;
+                g.soft_mouse_buttons = 0;
                 drop(g);
                 sync_input_grab(shared);
                 return;

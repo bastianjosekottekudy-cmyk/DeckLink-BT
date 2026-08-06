@@ -146,17 +146,42 @@ pub struct NetClient {
     last_rx: Instant,
 }
 
+pub fn parse_host_addr(host: &str) -> Result<SocketAddr, NetError> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err(NetError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "empty host",
+        )));
+    }
+    if let Ok(addr) = host.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    // Bracketed IPv6 without port: [::1]
+    if host.starts_with('[') {
+        if let Some(end) = host.find(']') {
+            let ip = &host[1..end];
+            let rest = &host[end + 1..];
+            if rest.is_empty() {
+                let ip: std::net::IpAddr = ip.parse().map_err(|e| {
+                    NetError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                })?;
+                return Ok(SocketAddr::new(ip, DEFAULT_PORT));
+            }
+        }
+    }
+    // Bare IPv4 / hostname / IPv6 without port
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Ok(SocketAddr::new(ip, DEFAULT_PORT));
+    }
+    format!("{host}:{DEFAULT_PORT}").parse().map_err(|e| {
+        NetError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+    })
+}
+
 impl NetClient {
     pub fn connect(host: &str, device_name: &str) -> Result<Self, NetError> {
-        let peer: SocketAddr = if host.contains(':') {
-            host.parse().map_err(|e| {
-                NetError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-            })?
-        } else {
-            format!("{host}:{DEFAULT_PORT}").parse().map_err(|e| {
-                NetError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-            })?
-        };
+        let peer = parse_host_addr(host)?;
 
         let sock = UdpSocket::bind("0.0.0.0:0")?;
         sock.set_read_timeout(Some(Duration::from_millis(800)))?;
@@ -174,16 +199,20 @@ impl NetClient {
                 return Err(NetError::HelloTimeout);
             }
             match sock.recv(&mut buf) {
-                Ok(n) => {
-                    let env = decode(&buf[..n])?;
-                    if env.kind == MsgKind::HelloAck {
+                Ok(n) => match decode(&buf[..n]) {
+                    Ok(env) if env.kind == MsgKind::HelloAck => {
                         let name = String::from_utf8_lossy(&env.payload).into_owned();
                         info!("Wi-Fi linked to {name} @ {peer}");
                         break name;
                     }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!("hello decode noise: {e}");
+                    }
+                },
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
                 {
                     sock.send(&hello)?;
                     continue;
@@ -275,5 +304,29 @@ mod tests {
         let got = decode_hid(&env.payload).unwrap();
         assert_eq!(got.report_id, 1);
         assert_eq!(got.data, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn parse_host_ipv4_and_port() {
+        assert_eq!(
+            parse_host_addr("192.168.1.10").unwrap(),
+            "192.168.1.10:31415".parse().unwrap()
+        );
+        assert_eq!(
+            parse_host_addr("192.168.1.10:4000").unwrap(),
+            "192.168.1.10:4000".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_host_ipv6() {
+        assert_eq!(
+            parse_host_addr("::1").unwrap(),
+            "[::1]:31415".parse().unwrap()
+        );
+        assert_eq!(
+            parse_host_addr("[::1]:4000").unwrap(),
+            "[::1]:4000".parse().unwrap()
+        );
     }
 }
