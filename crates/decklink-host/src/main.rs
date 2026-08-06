@@ -76,16 +76,29 @@ fn main() -> Result<()> {
 
     #[cfg(windows)]
     {
-        if !cli.skip_vigem_install {
-            if let Err(e) = vigem_setup::ensure_vigem() {
-                error!("{e}");
-                // Still start UI so user sees the error; server will also report vigem_ok=false.
-            }
-        }
-        // Discovery needs inbound UDP 31415 — private GUI apps often get silently blocked.
-        firewall::ensure_firewall_rule();
-
+        // Start UDP immediately — do not block the UI on ViGEm/firewall/UAC.
         let handle = server::spawn_host(cli.bind.clone(), cli.name.clone())?;
+
+        let skip_vigem = cli.skip_vigem_install;
+        let status = handle.status.clone();
+        std::thread::Builder::new()
+            .name("decklink-setup".into())
+            .spawn(move || {
+                if !skip_vigem {
+                    if let Err(e) = vigem_setup::ensure_vigem() {
+                        error!("{e}");
+                        let mut s = status.lock().unwrap();
+                        s.last_error = Some(e.to_string());
+                        s.vigem_ok = vigem_setup::vigem_available();
+                    } else if vigem_setup::vigem_available() {
+                        // Server may have started before the driver was ready — mark OK once installed.
+                        status.lock().unwrap().vigem_ok = true;
+                    }
+                }
+                firewall::ensure_firewall_rule();
+            })
+            .ok();
+
         if cli.headless {
             info!("headless host running — end the process to stop");
             let stop = Arc::new(AtomicBool::new(false));

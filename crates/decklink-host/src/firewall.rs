@@ -1,5 +1,6 @@
 //! Ensure Windows Firewall allows DeckLink Host UDP inbound.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 use tracing::{info, warn};
@@ -9,29 +10,38 @@ use decklink_net::DEFAULT_PORT;
 const RULE_NAME: &str = "DeckLink Host UDP";
 
 /// Best-effort: allow inbound UDP on the DeckLink port for this exe.
+/// Fast path: skip netsh if we already succeeded for this exe path.
 pub fn ensure_firewall_rule() {
-    if rule_exists() {
-        info!("firewall rule already present ({RULE_NAME})");
-        return;
-    }
     let Some(exe) = std::env::current_exe().ok() else {
         warn!("cannot resolve exe path for firewall rule");
         return;
     };
     let exe_s = exe.display().to_string();
 
-    // netsh is simpler to elevate than nested PowerShell quoting.
+    if marker_matches(&exe_s) {
+        info!("firewall rule marker ok — skip netsh");
+        return;
+    }
+
+    if rule_exists() {
+        write_marker(&exe_s);
+        info!("firewall rule already present ({RULE_NAME})");
+        return;
+    }
+
     let args = format!(
         "advfirewall firewall add rule name=\"{RULE_NAME}\" dir=in action=allow \
          protocol=UDP localport={DEFAULT_PORT} program=\"{exe_s}\" profile=any enable=yes"
     );
 
     if run_netsh(&args, false) {
+        write_marker(&exe_s);
         info!("firewall rule added (UDP {DEFAULT_PORT})");
         return;
     }
     warn!("firewall rule needs elevation — prompting UAC…");
     if run_netsh(&args, true) {
+        write_marker(&exe_s);
         info!("firewall rule added with elevation (UDP {DEFAULT_PORT})");
     } else {
         warn!(
@@ -41,9 +51,37 @@ pub fn ensure_firewall_rule() {
     }
 }
 
+fn marker_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("DeckLink")
+        .join("firewall_rule_v1.txt")
+}
+
+fn marker_matches(exe: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(marker_path()) else {
+        return false;
+    };
+    text.trim() == exe.trim()
+}
+
+fn write_marker(exe: &str) {
+    let path = marker_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, exe);
+}
+
 fn rule_exists() -> bool {
     let out = Command::new("netsh")
-        .args(["advfirewall", "firewall", "show", "rule", &format!("name={RULE_NAME}")])
+        .args([
+            "advfirewall",
+            "firewall",
+            "show",
+            "rule",
+            &format!("name={RULE_NAME}"),
+        ])
         .output();
     match out {
         Ok(o) => {
@@ -65,8 +103,6 @@ fn run_netsh(args: &str, elevate: bool) -> bool {
             .status();
         matches!(status, Ok(s) if s.success())
     } else {
-        // Split carefully: netsh wants the full argument string as separate tokens is hard;
-        // invoke via cmd /c for the non-elevated attempt.
         let status = Command::new("cmd")
             .args(["/C", &format!("netsh {args}")])
             .status();

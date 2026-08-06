@@ -92,14 +92,18 @@ fn run_loop(
         Err(e) => {
             let mut s = status.lock().unwrap();
             s.vigem_ok = false;
+            // Soft warning — setup thread may install the driver shortly.
             s.last_error = Some(format!(
-                "ViGEmBus not ready ({e}). Xbox mode unavailable; mouse/keyboard still work."
+                "ViGEmBus starting… ({e}). Xbox mode waits; mouse/keyboard work."
             ));
-            warn!("ViGEm unavailable — continuing without gamepad: {e}");
+            warn!("ViGEm unavailable at bind — will retry: {e}");
             None
         }
     };
     let mut inject = Injector::new();
+    let mut last_vigem_retry = Instant::now()
+        .checked_sub(Duration::from_secs(10))
+        .unwrap_or_else(Instant::now);
 
     {
         let mut s = status.lock().unwrap();
@@ -118,6 +122,26 @@ fn run_loop(
         .unwrap_or_else(Instant::now);
 
     while !stop.load(Ordering::SeqCst) {
+        // Retry ViGEm after background install finishes.
+        if pad.is_none() && last_vigem_retry.elapsed() > Duration::from_secs(2) {
+            last_vigem_retry = Instant::now();
+            match VirtualPad::new() {
+                Ok(p) => {
+                    info!("ViGEm Xbox pad ready (delayed)");
+                    let mut s = status.lock().unwrap();
+                    s.vigem_ok = true;
+                    if s.last_error
+                        .as_deref()
+                        .is_some_and(|e| e.contains("ViGEm"))
+                    {
+                        s.last_error = None;
+                    }
+                    pad = Some(p);
+                }
+                Err(_) => {}
+            }
+        }
+
         // Periodic multicast announce (Deck probes actively; this helps stubborn LANs).
         if last_announce.elapsed() > Duration::from_secs(2) {
             let _ = broadcast_announce(&sock, &name, &mut seq);

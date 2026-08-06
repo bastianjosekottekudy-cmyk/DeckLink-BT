@@ -1,6 +1,5 @@
-//! Minimal host window + system tray (close hides to tray).
+//! Minimal host window + system tray (close hides to tray; Quit exits).
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -12,95 +11,95 @@ use tray_icon::{
 
 use crate::server::HostHandle;
 
-pub fn run_ui(handle: HostHandle, title: String) -> Result<()> {
-    let show = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let quit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+struct HostApp {
+    handle: HostHandle,
+    tray: TrayIcon,
+    show_id: tray_icon::menu::MenuId,
+    quit_id: tray_icon::menu::MenuId,
+    /// Window should be visible (false = in tray only).
+    visible: bool,
+    /// User chose Quit — allow the window to actually close.
+    quitting: bool,
+    /// Apply Visible(false) on the next frame (never inside the input lock).
+    hide_pending: bool,
+    last_tip: String,
+}
 
-    let tray_menu = Menu::new();
-    let item_show = MenuItem::new("Show DeckLink Host", true, None);
-    let item_quit = MenuItem::new("Quit", true, None);
-    tray_menu
-        .append(&item_show)
-        .map_err(|e| anyhow!("tray menu: {e}"))?;
-    tray_menu
-        .append(&PredefinedMenuItem::separator())
-        .map_err(|e| anyhow!("tray menu: {e}"))?;
-    tray_menu
-        .append(&item_quit)
-        .map_err(|e| anyhow!("tray menu: {e}"))?;
+impl eframe::App for HostApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        egui::Color32::from_rgb(15, 20, 25).to_normalized_gamma_f32()
+    }
 
-    let icon = tray_icon_rgba();
-    let tray: TrayIcon = TrayIconBuilder::new()
-        .with_menu(Box::new(tray_menu))
-        .with_tooltip("DeckLink Host — waiting for Deck")
-        .with_icon(icon)
-        .build()
-        .map_err(|e| anyhow!("tray icon: {e}"))?;
-
-    let show_id = item_show.id().clone();
-    let quit_id = item_quit.id().clone();
-
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([440.0, 300.0])
-            .with_title(format!("DeckLink Host — {title}"))
-            .with_resizable(false),
-        ..Default::default()
-    };
-
-    let handle_ui = handle.clone();
-    let show_ui = show.clone();
-    let quit_ui = quit.clone();
-
-    let ui_result = eframe::run_simple_native("DeckLink Host", options, move |ctx, _frame| {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Tray menu / clicks
         if let Ok(event) = MenuEvent::receiver().try_recv() {
-            if event.id == show_id {
-                show_ui.store(true, std::sync::atomic::Ordering::SeqCst);
+            if event.id == self.show_id {
+                self.visible = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            } else if event.id == quit_id {
-                quit_ui.store(true, std::sync::atomic::Ordering::SeqCst);
-                handle_ui.request_stop();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            } else if event.id == self.quit_id {
+                self.quitting = true;
+                self.handle.request_stop();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
-        while TrayIconEvent::receiver().try_recv().is_ok() {
-            show_ui.store(true, std::sync::atomic::Ordering::SeqCst);
+        while let Ok(_ev) = TrayIconEvent::receiver().try_recv() {
+            self.visible = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         }
 
-        if quit_ui.load(std::sync::atomic::Ordering::SeqCst) {
-            return;
-        }
-
-        ctx.input(|i| {
-            if i.viewport().close_requested() {
-                show_ui.store(false, std::sync::atomic::Ordering::SeqCst);
+        // Close button → tray (must CancelClose or the process exits / crashes).
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        if close_requested {
+            if self.quitting {
+                // Let the window close and end the event loop.
+            } else {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.visible = false;
+                self.hide_pending = true;
             }
-        });
+        }
 
-        if !show_ui.load(std::sync::atomic::Ordering::SeqCst) {
-            ctx.request_repaint_after(Duration::from_millis(500));
+        if self.hide_pending {
+            self.hide_pending = false;
+            // Minimized + invisible is more reliable on Win32 than Visible alone.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
+        if self.quitting {
             return;
         }
 
-        let st = handle_ui.status.lock().unwrap().clone();
+        let st = self.handle.status.lock().unwrap().clone();
         let tip = if let Some(ref p) = st.peer_name {
             format!("DeckLink Host — linked: {p}")
         } else if st.listening {
             "DeckLink Host — waiting for Deck".to_string()
+        } else if let Some(ref e) = st.last_error {
+            format!("DeckLink Host — {e}")
         } else {
             "DeckLink Host — starting…".to_string()
         };
-        let _ = tray.set_tooltip(Some(tip.as_str()));
+        if tip != self.last_tip {
+            let _ = self.tray.set_tooltip(Some(tip.as_str()));
+            self.last_tip = tip;
+        }
+
+        if !self.visible {
+            // Stay in the event loop while hidden — do not tear down GL/window.
+            ctx.request_repaint_after(Duration::from_millis(500));
+            return;
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(8.0);
             ui.heading("DeckLink Host");
             ui.label("Steam Deck finds this PC on Wi‑Fi (UDP 31415).");
-            ui.label("First run may ask for firewall / ViGEm UAC approval.");
             ui.add_space(10.0);
 
             ui.horizontal(|ui| {
@@ -124,7 +123,7 @@ pub fn run_ui(handle: HostHandle, title: String) -> Result<()> {
             } else {
                 ui.colored_label(
                     egui::Color32::from_rgb(240, 113, 120),
-                    "ViGEmBus: not ready",
+                    "ViGEmBus: not ready (installing in background…)",
                 );
             }
 
@@ -147,17 +146,72 @@ pub fn run_ui(handle: HostHandle, title: String) -> Result<()> {
             ui.add_space(14.0);
             ui.label("Close this window to keep running in the system tray.");
             if ui.button("Quit").clicked() {
-                quit_ui.store(true, std::sync::atomic::Ordering::SeqCst);
-                handle_ui.request_stop();
+                self.quitting = true;
+                self.handle.request_stop();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         });
 
         ctx.request_repaint_after(Duration::from_millis(250));
-    });
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.handle.request_stop();
+    }
+}
+
+pub fn run_ui(handle: HostHandle, title: String) -> Result<()> {
+    let tray_menu = Menu::new();
+    let item_show = MenuItem::new("Show DeckLink Host", true, None);
+    let item_quit = MenuItem::new("Quit", true, None);
+    tray_menu
+        .append(&item_show)
+        .map_err(|e| anyhow!("tray menu: {e}"))?;
+    tray_menu
+        .append(&PredefinedMenuItem::separator())
+        .map_err(|e| anyhow!("tray menu: {e}"))?;
+    tray_menu
+        .append(&item_quit)
+        .map_err(|e| anyhow!("tray menu: {e}"))?;
+
+    let icon = tray_icon_rgba();
+    let tray: TrayIcon = TrayIconBuilder::new()
+        .with_menu(Box::new(tray_menu))
+        .with_tooltip("DeckLink Host — waiting for Deck")
+        .with_icon(icon)
+        .build()
+        .map_err(|e| anyhow!("tray icon: {e}"))?;
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([460.0, 320.0])
+            .with_title(format!("DeckLink Host — {title}"))
+            .with_resizable(false)
+            .with_minimize_button(true)
+            .with_close_button(true),
+        centered: true,
+        ..Default::default()
+    };
+
+    let app = HostApp {
+        handle: handle.clone(),
+        tray,
+        show_id: item_show.id().clone(),
+        quit_id: item_quit.id().clone(),
+        visible: true,
+        quitting: false,
+        hide_pending: false,
+        last_tip: String::new(),
+    };
+
+    let result = eframe::run_native(
+        "DeckLink Host",
+        options,
+        Box::new(|_cc| Ok(Box::new(app))),
+    );
 
     handle.request_stop();
-    ui_result.map_err(|e| anyhow!("UI: {e}"))
+    result.map_err(|e| anyhow!("UI: {e}"))
 }
 
 fn tray_icon_rgba() -> tray_icon::Icon {
@@ -166,6 +220,7 @@ fn tray_icon_rgba() -> tray_icon::Icon {
     for y in 0..size {
         for x in 0..size {
             let i = ((y * size + x) * 4) as usize;
+            // Simple teal square — no PNG decode at startup.
             rgba[i] = 30;
             rgba[i + 1] = 140;
             rgba[i + 2] = 180;
