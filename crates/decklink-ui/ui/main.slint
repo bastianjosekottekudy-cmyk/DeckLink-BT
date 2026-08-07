@@ -10,7 +10,8 @@ component KeyCap inherits Rectangle {
     callback tapped(int);
 
     min-width: wide ? 72px : 42px;
-    preferred-height: 44px;
+    min-height: 36px;
+    preferred-height: 40px;
     horizontal-stretch: 1;
     border-radius: 8px;
     background: !enabled ? #1a222c :
@@ -31,6 +32,8 @@ component KeyCap inherits Rectangle {
     }
 
     TouchArea {
+        width: 100%;
+        height: 100%;
         enabled: root.enabled;
         clicked => { root.tapped(root.code); }
     }
@@ -289,10 +292,11 @@ export component MainWindow inherits Window {
             spacing: 6px;
             vertical-stretch: 1;
 
-            // Row: trackpad (main) + mouse buttons column
+            // Row: trackpad (main) + mouse buttons column (keep short so Space fits)
             HorizontalBox {
                 spacing: 8px;
-                preferred-height: 160px;
+                preferred-height: 96px;
+                vertical-stretch: 0;
 
                 Rectangle {
                     border-radius: 16px;
@@ -345,6 +349,7 @@ export component MainWindow inherits Window {
                 }
                 KeyCap { label: "Esc"; code: 41; accent: true; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
                 KeyCap { label: "Tab"; code: 43; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
+                KeyCap { label: "Space"; code: 44; wide: true; accent: true; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
                 KeyCap { label: "⌫"; code: 42; accent: true; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
                 KeyCap { label: "Enter"; code: 40; wide: true; accent: true; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
             }
@@ -433,28 +438,34 @@ export component MainWindow inherits Window {
                 Rectangle { min-width: 36px; background: transparent; }
             }
 
+            // Bottom bar: wide Space (min-height so layout never clips it away)
             HorizontalBox {
                 spacing: 4px;
+                vertical-stretch: 0;
                 KeyCap { label: "Ins"; code: 73; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
                 KeyCap { label: "Home"; code: 74; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
                 KeyCap { label: "PgUp"; code: 75; enabled: root.input-ok; tapped(c) => { root.key-tap(c); } }
                 Rectangle {
                     border-radius: 8px;
-                    background: #1c2630;
-                    preferred-height: 44px;
-                    horizontal-stretch: 3;
+                    background: #1e3a4f;
+                    min-height: 36px;
+                    preferred-height: 40px;
+                    min-width: 160px;
+                    horizontal-stretch: 4;
                     border-width: 1px;
-                    border-color: #2a3542;
+                    border-color: #5eb0ff;
                     Text {
                         width: 100%; height: 100%;
                         text: "Space";
-                        color: #e8eef5;
+                        color: #7ec8ff;
                         font-size: 15px;
-                        font-weight: 600;
+                        font-weight: 700;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
                     TouchArea {
+                        width: 100%;
+                        height: 100%;
                         enabled: root.input-ok;
                         clicked => { root.key-tap(44); }
                     }
